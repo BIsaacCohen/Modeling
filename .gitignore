@@ -1,0 +1,22 @@
+# General OS cruft
+.DS_Store
+Thumbs.db
+
+# MATLAB / Simulink backup + build outputs
+*.asv
+*.m~
+*.mex*
+slprj/
+*.slxc
+*.mdl.r20*
+*.tmr
+*.mexw*
+*.mexm*
+*.mexg*
+*.mexs*
+*.mexw32
+*.mexw64
+*.mexmaci64
+*.mexglx
+*.mexa64
+
