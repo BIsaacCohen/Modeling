@@ -1,10 +1,11 @@
 function results = face_only_bidirectional_lag_isaac(fluo_file, motion_file, behav_roi_file, neural_roi_file, vascular_mask_file, brain_mask_file, opts)
 % face_only_bidirectional_lag_isaac Bidirectional lag ridge regression (leads + lags)
 %
-%   Fits bidirectional temporal model Y(t) = Σ βᵢ·X(t-i) + intercept with both
-%   negative (leads) and positive (lags) offsets. Negative lags test whether
-%   fluorescence PREDICTS future motion (motor planning), while positive lags
-%   test whether motion DRIVES fluorescence (sensory feedback).
+%   Fits bidirectional temporal model Y(t) = Σ βᵢ·X(t-i) with both negative
+%   (leads) and positive (lags) offsets. All data is z-scored, so no intercept
+%   is included. Negative lags test whether fluorescence PREDICTS future motion
+%   (motor planning), while positive lags test whether motion DRIVES fluorescence
+%   (sensory feedback).
 %
 %   results = face_only_bidirectional_lag_isaac(fluo_file, motion_file, ...
 %       behav_roi_file, neural_roi_file, vascular_mask_file, brain_mask_file, opts)
@@ -29,9 +30,8 @@ function results = face_only_bidirectional_lag_isaac(fluo_file, motion_file, beh
 %       save_results             - Save results to .mat file (default true)
 %
 %   OUTPUTS (results struct):
-%       beta                - Regression coefficients [β_min, ..., β_0, ..., β_max]
+%       beta                - Regression coefficients [β_min, ..., β_0, ..., β_max] (z-score units)
 %       lambda_mml          - Optimal lambda from ridgeMML
-%       intercept           - Regression intercept
 %       R2_bidirectional    - R² using bidirectional lags (min to max)
 %       R2_causal_only      - R² using only non-negative lags (0 to max)
 %       delta_R2_predictive - Improvement from adding negative lags (leads)
@@ -248,19 +248,7 @@ lambda_final = mean(lambda_mml(:));
 fprintf('  Optimal lambda (MML): %.4f\n', lambda_final);
 fprintf('  Number of predictors: %d (lags %d to +%d)\n', n_lags_total, min_lag, max_lag);
 
-% Calculate intercept
-X_mean_orig = zeros(1, n_lags_total);
-lag_idx = 0;
-for lag = min_lag:max_lag
-    lag_idx = lag_idx + 1;
-    start_idx = max_lag + 1 - lag;
-    end_idx = min_length - abs(min_lag) - lag;
-    X_mean_orig(lag_idx) = mean(face_motion(start_idx:end_idx));
-end
-Y_mean_orig = mean(neural_trace(max_lag+1 : min_length-abs(min_lag)));
-intercept = Y_mean_orig - X_mean_orig * beta;
-
-% Generate predictions
+% Generate predictions (all in z-score units; no intercept needed)
 Y_pred = X * beta;
 
 % Calculate R²
@@ -346,7 +334,6 @@ results.regressor_names = regressor_names;
 results.beta = beta;
 results.lambda_mml = lambda_final;
 results.lambda_causal = mean(lambda_causal(:));
-results.intercept = intercept;
 results.convergence_failure = convergenceFailure;
 results.convergence_failure_causal = convergence_causal;
 results.R2_bidirectional = R2_bidirectional;
@@ -408,7 +395,7 @@ function log_cfg(fluo_file, motion_file, neural_roi_file, opts)
     fprintf('  Fluorescence: %s\n', fluo_file);
     fprintf('  Motion:       %s\n', motion_file);
     fprintf('  Neural ROI:   %s (target = %s)\n', neural_roi_file, opts.target_roi_name);
-    fprintf('  Model:        Y(t) = Σ βᵢ·X(t-i) + intercept, lags %d to +%d\n', opts.min_lag, opts.max_lag);
+    fprintf('  Model:        Y(t) = Σ βᵢ·X(t-i), lags %d to +%d (z-scored, no intercept)\n', opts.min_lag, opts.max_lag);
     fprintf('==============================================================\n');
 end
 
