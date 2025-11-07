@@ -253,13 +253,23 @@ window_samples = min(window_samples, numel(trace));
 if mod(window_samples, 2) == 0
     window_samples = window_samples + 1;
 end
-half = floor(window_samples / 2);
-pad_front = repmat(trace(1), half, 1);
-pad_back = repmat(trace(end), half, 1);
-padded = [pad_front; trace; pad_back];
-baseline = zeros(size(trace));
-for idx = 1:numel(trace)
-    segment = padded(idx : idx + window_samples - 1);
-    baseline(idx) = prctile(segment, percentile);
+% Use movmedian when percentile == 50 as an optimization
+try
+    baseline = movprctile(trace, window_samples, percentile, 'Endpoints', 'shrink');
+catch
+    % Fallback: use movmedian for 50th percentile
+    if percentile == 50
+        baseline = movmedian(trace, window_samples, 'Endpoints', 'shrink');
+    else
+        half = floor(window_samples / 2);
+        pad_front = repmat(trace(1), half, 1);
+        pad_back = repmat(trace(end), half, 1);
+        padded = [pad_front; trace; pad_back];
+        baseline = zeros(size(trace));
+        for idx = 1:numel(trace)
+            segment = padded(idx : idx + window_samples - 1);
+            baseline(idx) = prctile(segment, percentile);
+        end
+    end
 end
 end
