@@ -480,18 +480,22 @@ function plot_temporal_kernel(results)
 
     figure('Name', fig_title, 'Position', [100 100 900 600]);
 
-    % Plot CV-averaged beta with error bars
-    errorbar(tk.lag_times_sec, tk.beta_cv_mean, tk.beta_cv_sem, ...
-        'o-', 'LineWidth', 2, 'MarkerSize', 8, ...
-        'MarkerFaceColor', [0.2 0.4 0.8], 'Color', [0.2 0.4 0.8], ...
-        'DisplayName', 'CV mean ± SEM');
-
     hold on;
 
-    % Overlay full-data beta as reference (dashed)
-    plot(tk.lag_times_sec, tk.beta_full_data, '--', ...
-        'LineWidth', 1.5, 'Color', [0.7 0.7 0.7], ...
-        'DisplayName', 'Full-data fit');
+    kernel_color = [0.15 0.35 0.8];
+    sem_upper = tk.beta_cv_mean + tk.beta_cv_sem;
+    sem_lower = tk.beta_cv_mean - tk.beta_cv_sem;
+
+    % SEM envelope
+    fill([tk.lag_times_sec; flipud(tk.lag_times_sec)], ...
+         [sem_upper; flipud(sem_lower)], kernel_color, ...
+         'FaceAlpha', 0.15, 'EdgeColor', 'none', ...
+         'DisplayName', 'SEM envelope');
+
+    % Smooth mean line
+    plot(tk.lag_times_sec, tk.beta_cv_mean, ...
+        'LineWidth', 2.5, 'Color', kernel_color, ...
+        'DisplayName', 'CV mean');
 
     % Zero lines
     plot([min(tk.lag_times_sec), max(tk.lag_times_sec)], [0 0], ...
@@ -500,30 +504,18 @@ function plot_temporal_kernel(results)
     yl = ylim;
     plot([0, 0], yl, 'k:', 'LineWidth', 1.5, 'HandleVisibility', 'off');
 
-    % Mark peak
-    plot(tk.peak_lag_sec, tk.peak_beta, 'r*', ...
-        'MarkerSize', 15, 'LineWidth', 2, ...
-        'DisplayName', sprintf('Peak (%.3f s)', tk.peak_lag_sec));
-
-    % Vertical line at peak
-    plot([tk.peak_lag_sec, tk.peak_lag_sec], yl, 'r--', ...
-        'LineWidth', 1.5, 'HandleVisibility', 'off');
-
-    % Shade predictive region (negative lags)
-    if results.metadata.min_lag < 0
-        x_pred = [min(tk.lag_times_sec), 0, 0, min(tk.lag_times_sec)];
-        y_pred = [yl(1), yl(1), yl(2), yl(2)];
-        patch(x_pred, y_pred, [1 0.9 0.9], 'FaceAlpha', 0.3, ...
-            'EdgeColor', 'none', 'DisplayName', 'Predictive (leads)');
-    end
+    % Peak indicator (vertical dashed line)
+    plot([tk.peak_lag_sec, tk.peak_lag_sec], yl, '--', ...
+        'LineWidth', 1.5, 'Color', [0.4 0.4 0.4], ...
+        'DisplayName', sprintf('Peak lag (%.3f s)', tk.peak_lag_sec));
 
     hold off;
 
-    xlabel('Lag time (seconds)', 'FontSize', 11);
-    ylabel('Beta coefficient', 'FontSize', 11);
-    title(fig_title, 'FontSize', 12, 'Interpreter', 'none');
-    legend('Location', 'best');
-    grid on;
+    xlabel('Lag time (seconds)', 'FontSize', 13);
+    ylabel('Beta coefficient', 'FontSize', 13);
+    title(fig_title, 'FontSize', 15, 'Interpreter', 'none');
+    legend('Location', 'best', 'FontSize', 11);
+    grid off;
 
     % Add performance annotation
     anno_str = sprintf(['R² (CV): %.2f%% ± %.2f%%\n' ...
@@ -535,15 +527,15 @@ function plot_temporal_kernel(results)
 
     annotation(gcf, 'textbox', [0.15 0.75 0.25 0.18], ...
         'String', anno_str, 'EdgeColor', 'k', 'BackgroundColor', 'w', ...
-        'FitBoxToText', 'on', 'FontSize', 9);
+        'FitBoxToText', 'on', 'FontSize', 11);
 
-    % Region labels
+    % Region labels (text only)
     if results.metadata.min_lag < 0
-        text(min(tk.lag_times_sec)/2, yl(2)*0.9, 'PREDICTIVE', ...
-            'HorizontalAlignment', 'center', 'FontSize', 10, 'Color', [0.5 0 0]);
+        text(min(tk.lag_times_sec)*0.8, yl(2)*0.9, 'Predictive', ...
+            'HorizontalAlignment', 'center', 'FontSize', 12, 'Color', [0.3 0.2 0.2]);
     end
-    text(max(tk.lag_times_sec)/2, yl(2)*0.9, 'REACTIVE', ...
-        'HorizontalAlignment', 'center', 'FontSize', 10, 'Color', [0 0 0.5]);
+    text(max(tk.lag_times_sec)*0.8, yl(2)*0.9, 'Reactive', ...
+        'HorizontalAlignment', 'center', 'FontSize', 12, 'Color', [0.2 0.2 0.2]);
 end
 
 function plot_model_predictions(results)
