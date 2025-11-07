@@ -58,7 +58,10 @@ defaults = struct(...
     'filter_order', 4, ...
     'show_plot', true, ...
     'roi_name', 'ROI', ...
-    'min_baseline', 1e-6);
+    'min_baseline', 1e-6, ...
+    'baseline_method', 'butterworth', ...
+    'baseline_window_seconds', 600, ...
+    'baseline_percentile', 10);
 
 opts = populate_defaults(opts, defaults);
 
@@ -73,52 +76,50 @@ assert(opts.filter_order > 0 && mod(opts.filter_order, 1) == 0, ...
 trace = trace(:);
 n_samples = length(trace);
 
-% Check Nyquist criterion
-nyquist_freq = sampling_rate / 2;
-if opts.cutoff_freq >= nyquist_freq
-    error('Cutoff frequency (%.3f Hz) must be less than Nyquist frequency (%.3f Hz)', ...
-        opts.cutoff_freq, nyquist_freq);
-end
-
 fprintf('=== dFF_phasic: Phasic df/f computation ===\n');
 fprintf('  Input trace: %d samples (%.2f s @ %.2f Hz)\n', ...
     n_samples, n_samples / sampling_rate, sampling_rate);
-fprintf('  Cutoff frequency: %.3f Hz (period = %.1f s)\n', ...
-    opts.cutoff_freq, 1 / opts.cutoff_freq);
-fprintf('  Filter order: %d\n', opts.filter_order);
-
-%% Design Butterworth low-pass filter
-try
-    % Normalized cutoff frequency (fraction of Nyquist)
-    Wn = opts.cutoff_freq / nyquist_freq;
-
-    % Design Butterworth filter
-    [b, a] = butter(opts.filter_order, Wn, 'low');
-
-    % Check filter stability
-    if max(abs(roots(a))) >= 1
-        warning('Filter design may be unstable. Reducing order.');
-        [b, a] = butter(2, Wn, 'low');
-    end
-
-    filter_valid = true;
-    fprintf('  Filter design: SUCCESS\n');
-
-catch ME
-    warning('Filter design failed: %s. Using moving average fallback.', ME.message);
-    filter_valid = false;
+fprintf('  Baseline method: %s\n', opts.baseline_method);
+if strcmpi(opts.baseline_method, 'butterworth')
+    fprintf('  Cutoff frequency: %.3f Hz (period = %.1f s)\n', ...
+        opts.cutoff_freq, 1 / opts.cutoff_freq);
+    fprintf('  Filter order: %d\n', opts.filter_order);
 end
 
-%% Extract baseline F₀(t)
-if filter_valid
-    % Zero-phase filtering (no temporal shift)
-    baseline_F0 = filtfilt(b, a, trace);
-    fprintf('  Baseline extraction: filtfilt (zero-phase)\n');
-else
-    % Fallback: moving average
-    window_samples = round(sampling_rate / opts.cutoff_freq);
-    baseline_F0 = movmean(trace, window_samples, 'Endpoints', 'shrink');
-    fprintf('  Baseline extraction: movmean (fallback, window=%d)\n', window_samples);
+baseline_method = lower(opts.baseline_method);
+nyquist_freq = sampling_rate / 2;
+filter_valid = true;
+
+switch baseline_method
+    case 'butterworth'
+        if opts.cutoff_freq >= nyquist_freq
+            error('Cutoff frequency (%.3f Hz) must be less than Nyquist frequency (%.3f Hz)', ...
+                opts.cutoff_freq, nyquist_freq);
+        end
+        try
+            Wn = opts.cutoff_freq / nyquist_freq;
+            [b, a] = butter(opts.filter_order, Wn, 'low');
+            if max(abs(roots(a))) >= 1
+                warning('Filter design may be unstable. Reducing order.');
+                [b, a] = butter(2, Wn, 'low');
+            end
+            baseline_F0 = filtfilt(b, a, trace);
+            fprintf('  Baseline extraction: filtfilt (zero-phase)\n');
+        catch ME
+            warning('Filter design failed: %s. Using moving average fallback.', ME.message);
+            filter_valid = false;
+            window_samples = max(5, round(sampling_rate / max(opts.cutoff_freq, eps)));
+            baseline_F0 = movmean(trace, window_samples, 'Endpoints', 'shrink');
+            fprintf('  Baseline extraction: movmean (fallback, window=%d)\n', window_samples);
+        end
+    case 'running_percentile'
+        window_seconds = opts.baseline_window_seconds;
+        percentile = opts.baseline_percentile;
+        fprintf('  Baseline extraction: running percentile (window %.1f s, %.1f%%)\n', ...
+            window_seconds, percentile);
+        baseline_F0 = running_percentile_baseline(trace, sampling_rate, window_seconds, percentile);
+    otherwise
+        error('Unknown baseline_method: %s', opts.baseline_method);
 end
 
 % Clamp baseline to prevent division by zero or negative values
@@ -137,6 +138,7 @@ diagnostics = struct();
 diagnostics.baseline_F0 = baseline_F0;
 diagnostics.cutoff_freq = opts.cutoff_freq;
 diagnostics.filter_order = opts.filter_order;
+diagnostics.baseline_method = opts.baseline_method;
 diagnostics.nyquist_freq = nyquist_freq;
 diagnostics.filter_valid = filter_valid;
 diagnostics.n_samples = n_samples;
@@ -237,4 +239,27 @@ function plot_dff_phasic_validation(raw_trace, baseline, dff_phasic, fs, roi_nam
 
     % Zoom to show detail (first 60 seconds or full trace if shorter)
     xlim(ax1, [0, min(60, time_vec(end))]);
+end
+
+function baseline = running_percentile_baseline(trace, sampling_rate, window_seconds, percentile)
+if nargin < 4 || isempty(percentile)
+    percentile = 10;
+end
+if nargin < 3 || isempty(window_seconds)
+    window_seconds = 60;
+end
+window_samples = max(3, round(window_seconds * sampling_rate));
+window_samples = min(window_samples, numel(trace));
+if mod(window_samples, 2) == 0
+    window_samples = window_samples + 1;
+end
+half = floor(window_samples / 2);
+pad_front = repmat(trace(1), half, 1);
+pad_back = repmat(trace(end), half, 1);
+padded = [pad_front; trace; pad_back];
+baseline = zeros(size(trace));
+for idx = 1:numel(trace)
+    segment = padded(idx : idx + window_samples - 1);
+    baseline(idx) = prctile(segment, percentile);
+end
 end
