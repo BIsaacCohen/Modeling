@@ -44,7 +44,7 @@ function ROI = rois_to_mat(fluo_file, motion_file, behav_roi_file, neural_roi_fi
         opts = struct();
     end
 
-    defaults = struct('chunk_size_frames', 500, 'ComputeDFF', true, ...
+    defaults = struct('chunk_size_frames', 5000, 'ComputeDFF', true, ...
         'DFFParams', struct(), 'Fs', [], 'OutputFile', '', 'SaveOutput', true);
     opts = populate_defaults(opts, defaults);
 
@@ -108,10 +108,10 @@ function ROI = rois_to_mat(fluo_file, motion_file, behav_roi_file, neural_roi_fi
     end
 
     [roi_info, roi_source_path] = load_neural_roi_info(neural_roi_file);
-    [fluo_idx, fluo_labels] = prepare_roi_indices_compact(roi_info, final_mask, [fluo_Y, fluo_X]);
+    [fluo_weights, fluo_labels] = prepare_roi_weights(roi_info, final_mask, [fluo_Y, fluo_X]);
     fprintf('  Fluorescence ROIs loaded: %s\n', strjoin(fluo_labels, ', '));
 
-    fluo_data_raw = extract_roi_traces_multi(fluo_file, [fluo_Y, fluo_X], fluo_T, fluo_idx, opts.chunk_size_frames, 'fluorescence');
+    fluo_data_raw = extract_roi_traces_multi(fluo_file, [fluo_Y, fluo_X], fluo_T, fluo_weights, opts.chunk_size_frames, 'fluorescence');
     fprintf('  Fluorescence traces extracted (%d samples x %d ROIs)\n', size(fluo_data_raw,1), size(fluo_data_raw,2));
 
     Fs = opts.Fs;
@@ -151,9 +151,9 @@ function ROI = rois_to_mat(fluo_file, motion_file, behav_roi_file, neural_roi_fi
         if ~isfield(behav_data, 'ROI_info')
             error('Behavior ROI file %s does not contain ROI_info.', behav_roi_file);
         end
-        [beh_idx, beh_labels] = prepare_roi_indices_compact(behav_data.ROI_info, true(me_Y, me_X), [me_Y, me_X]);
+        [beh_weights, beh_labels] = prepare_roi_weights(behav_data.ROI_info, true(me_Y, me_X), [me_Y, me_X]);
         fprintf('  Behavior ROIs loaded: %s\n', strjoin(beh_labels, ', '));
-        beh_data = extract_roi_traces_multi(motion_file, [me_Y, me_X], me_T, beh_idx, opts.chunk_size_frames, 'behavior');
+        beh_data = extract_roi_traces_multi(motion_file, [me_Y, me_X], me_T, beh_weights, opts.chunk_size_frames, 'behavior');
         Beh = struct();
         Beh.data = beh_data;
         Beh.labels = beh_labels;
@@ -293,11 +293,13 @@ function roi_path = resolve_referenced_roi_file(base_file, roi_reference)
     error('Unable to resolve fluorescence ROI file "%s" referenced from %s.', roi_reference, base_file);
 end
 
-function [roi_idx, labels] = prepare_roi_indices_compact(roi_info, mask_limit, dims)
+function [weights, labels] = prepare_roi_weights(roi_info, mask_limit, dims)
     n = numel(roi_info);
-    roi_idx = cell(1, n);
     labels = cell(1, n);
-    keep = true(1, n);
+    data_rows = [];
+    data_cols = [];
+    data_vals = [];
+    col = 0;
     for i = 1:n
         labels{i} = char(roi_info(i).Name);
         mask = logical(roi_info(i).Stats.ROI_binary_mask);
@@ -308,17 +310,21 @@ function [roi_idx, labels] = prepare_roi_indices_compact(roi_info, mask_limit, d
         idx = find(mask(:));
         if isempty(idx)
             warning('ROI %s has 0 pixels after masking and will be dropped.', labels{i});
-            keep(i) = false;
-        else
-            roi_idx{i} = idx;
+            continue;
         end
+        col = col + 1;
+        labels{col} = labels{i};
+        data_rows = [data_rows; idx]; %#ok<AGROW>
+        data_cols = [data_cols; repmat(col, numel(idx), 1)]; %#ok<AGROW>
+        data_vals = [data_vals; ones(numel(idx), 1) ./ numel(idx)]; %#ok<AGROW>
     end
-    roi_idx = roi_idx(keep);
-    labels = labels(keep);
+    labels = labels(1:col);
+    n_pixels = prod(dims);
+    weights = sparse(double(data_rows), double(data_cols), data_vals, n_pixels, col);
 end
 
-function traces = extract_roi_traces_multi(dat_file, dims, n_frames, roi_idx, chunk_size, label)
-    n_rois = numel(roi_idx);
+function traces = extract_roi_traces_multi(dat_file, dims, n_frames, roi_weights, chunk_size, label)
+    n_rois = size(roi_weights, 2);
     traces = zeros(n_frames, n_rois);
     pixels_per_frame = prod(dims);
     fid = fopen(dat_file, 'r');
@@ -336,12 +342,9 @@ function traces = extract_roi_traces_multi(dat_file, dims, n_frames, roi_idx, ch
             error('Unexpected EOF while reading %s', dat_file);
         end
         raw = reshape(raw, pixels_per_frame, frames_this_chunk);
-        for r = 1:n_rois
-            idx = roi_idx{r};
-            if isempty(idx)
-                continue;
-            end
-            traces(start_idx:end_idx, r) = mean(raw(idx, :), 1)';
+        if n_rois > 0
+            chunk_means = (raw.' * roi_weights);
+            traces(start_idx:end_idx, :) = chunk_means;
         end
         if mod(chunk, 20) == 0 || chunk == n_chunks
             fprintf('  %s chunk %d/%d processed\n', label, chunk, n_chunks);
