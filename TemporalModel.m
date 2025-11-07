@@ -231,7 +231,8 @@ for fold = 1:cv_folds
     Y_test = Y(test_idx);
 
     % Fit ridge regression on training data
-    [lambda_fold, beta_fold, conv_fail] = ridgeMML(Y_train, X_train, 0);
+    % Use recenter=1 so ridgeMML does not insert an intercept column
+    [lambda_fold, beta_fold, conv_fail] = ridgeMML(Y_train, X_train, 1);
 
     % Store results
     beta_cv_folds(:, fold) = beta_fold;
