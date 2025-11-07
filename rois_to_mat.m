@@ -326,26 +326,43 @@ end
 function traces = extract_roi_traces_multi(dat_file, dims, n_frames, roi_weights, chunk_size, label)
     n_rois = size(roi_weights, 2);
     traces = zeros(n_frames, n_rois);
-    pixels_per_frame = prod(dims);
-    fid = fopen(dat_file, 'r');
-    if fid < 0
-        error('Unable to open %s', dat_file);
+    if n_rois == 0
+        return;
     end
-    cleanup = onCleanup(@() fclose(fid));
+    pixels_per_frame = prod(dims);
+    bytes_per_frame = pixels_per_frame * 4; % single precision
     n_chunks = ceil(n_frames / chunk_size);
+    chunk_info = struct('start_idx', cell(n_chunks,1), 'end_idx', [], 'frames', [], 'offset', []);
     for chunk = 1:n_chunks
         start_idx = (chunk - 1) * chunk_size + 1;
         end_idx = min(chunk * chunk_size, n_frames);
         frames_this_chunk = end_idx - start_idx + 1;
-        raw = fread(fid, pixels_per_frame * frames_this_chunk, 'single=>double');
-        if numel(raw) < pixels_per_frame * frames_this_chunk
+        chunk_info(chunk).start_idx = start_idx;
+        chunk_info(chunk).end_idx = end_idx;
+        chunk_info(chunk).frames = frames_this_chunk;
+        chunk_info(chunk).offset = (start_idx - 1) * bytes_per_frame;
+    end
+
+    chunk_results = cell(n_chunks,1);
+    parfor chunk = 1:n_chunks
+        info = chunk_info(chunk);
+        fid = fopen(dat_file, 'r');
+        if fid < 0
+            error('Unable to open %s', dat_file);
+        end
+        cleaner = onCleanup(@() fclose(fid)); %#ok<NASGU>
+        fseek(fid, info.offset, 'bof');
+        raw = fread(fid, pixels_per_frame * info.frames, 'single=>double');
+        if numel(raw) < pixels_per_frame * info.frames
             error('Unexpected EOF while reading %s', dat_file);
         end
-        raw = reshape(raw, pixels_per_frame, frames_this_chunk);
-        if n_rois > 0
-            chunk_means = (raw.' * roi_weights);
-            traces(start_idx:end_idx, :) = chunk_means;
-        end
+        raw = reshape(raw, pixels_per_frame, info.frames);
+        chunk_results{chunk} = raw.' * roi_weights;
+    end
+
+    for chunk = 1:n_chunks
+        info = chunk_info(chunk);
+        traces(info.start_idx:info.end_idx, :) = chunk_results{chunk};
         if mod(chunk, 20) == 0 || chunk == n_chunks
             fprintf('  %s chunk %d/%d processed\n', label, chunk, n_chunks);
         end
