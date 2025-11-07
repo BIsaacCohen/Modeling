@@ -20,22 +20,20 @@ function ROI = rois_to_mat(fluo_file, motion_file, behav_roi_file, neural_roi_fi
 %       OutputFile         - Path for ROI.mat (default: <fluorescence folder>/ROI.mat)
 %       SaveOutput         - Save ROI struct to disk (default true)
 %
-%   OUTPUT (ROI struct):
+%   OUTPUT (ROI struct, compact):
 %       .metadata          - provenance, timestamps, source paths
 %       .modalities.fluorescence
 %           .data          - [T x N] fluorescence dF/F (or raw if ComputeDFF==false)
 %           .raw_data      - [T x N] original fluorescence (when dF/F computed)
 %           .labels        - ROI names from fluoROIs.roimsk
 %           .time          - time vector (seconds)
-%           .sampling_rate - Hz from metadata (or opts.Fs)
-%           .traces_table  - table with labeled columns (dF/F)
+%           .sample_rate   - Hz from metadata (or opts.Fs)
+%           .dff_params    - struct of dF/F parameters (when ComputeDFF==true)
 %       .modalities.behavior (present when motion + behav ROI inputs supplied)
 %           .data          - [Tb x Nb] motion-energy ROI means (raw)
 %           .labels        - ROI names (e.g., 'Face','Licking','Forelimbs')
 %           .time          - time vector (seconds)
-%           .sampling_rate - Hz from motion metadata
-%           .traces_table  - table with labeled columns
-%       Top-level convenience aliases (.data/.labels/...) mirror fluorescence modality
+%           .sample_rate   - Hz from motion metadata
 %
 %   The function never re-estimates ROIs; it simply loads masks from the
 %   provided .roimsk/.mat files, averages the specified .dat movies within
@@ -82,7 +80,7 @@ function ROI = rois_to_mat(fluo_file, motion_file, behav_roi_file, neural_roi_fi
         opts.OutputFile = fullfile(fileparts(fluo_file), 'ROI.mat');
     end
 
-    fprintf('=== rois_to_mat ===\n');
+    fprintf('=== rois_to_mat (compact) ===\n');
     fprintf('  Fluorescence movie : %s\n', fluo_file);
     if ~isempty(motion_file)
         fprintf('  Motion movie       : %s\n', motion_file);
@@ -110,7 +108,7 @@ function ROI = rois_to_mat(fluo_file, motion_file, behav_roi_file, neural_roi_fi
     end
 
     [roi_info, roi_source_path] = load_neural_roi_info(neural_roi_file);
-    [fluo_idx, fluo_labels, fluo_pixels] = prepare_roi_indices(roi_info, final_mask, [fluo_Y, fluo_X]);
+    [fluo_idx, fluo_labels] = prepare_roi_indices_compact(roi_info, final_mask, [fluo_Y, fluo_X]);
     fprintf('  Fluorescence ROIs loaded: %s\n', strjoin(fluo_labels, ', '));
 
     fluo_data_raw = extract_roi_traces_multi(fluo_file, [fluo_Y, fluo_X], fluo_T, fluo_idx, opts.chunk_size_frames, 'fluorescence');
@@ -126,7 +124,6 @@ function ROI = rois_to_mat(fluo_file, motion_file, behav_roi_file, neural_roi_fi
 
     Fluo = struct();
     Fluo.labels = fluo_labels;
-    Fluo.pixel_counts = fluo_pixels;
     Fluo.sample_rate = Fs;
     Fluo.time = build_time_vector(size(fluo_data_raw,1), Fs);
 
@@ -137,18 +134,13 @@ function ROI = rois_to_mat(fluo_file, motion_file, behav_roi_file, neural_roi_fi
         Fluo.raw_data = fluo_data_raw;
         fluo_dff = compute_dff_matrix(fluo_data_raw, opts.DFFParams, Fs, Fluo.labels);
         Fluo.data = fluo_dff;
-        Fluo.type = 'dFF_phasic';
         Fluo.dff_params = pack_params(opts.DFFParams, Fs);
     else
         Fluo.data = fluo_data_raw;
-        Fluo.type = 'raw';
         Fluo.raw_data = [];
         Fluo.dff_params = struct();
     end
 
-    Fluo.n_samples = size(Fluo.data,1);
-    Fluo.n_rois = size(Fluo.data,2);
-    Fluo.traces_table = build_table(Fluo.data, Fluo.labels);
 
     %% Behavior ROI extraction (optional)
     Beh = [];
@@ -159,19 +151,14 @@ function ROI = rois_to_mat(fluo_file, motion_file, behav_roi_file, neural_roi_fi
         if ~isfield(behav_data, 'ROI_info')
             error('Behavior ROI file %s does not contain ROI_info.', behav_roi_file);
         end
-        [beh_idx, beh_labels, beh_pixels] = prepare_roi_indices(behav_data.ROI_info, true(me_Y, me_X), [me_Y, me_X]);
+        [beh_idx, beh_labels] = prepare_roi_indices_compact(behav_data.ROI_info, true(me_Y, me_X), [me_Y, me_X]);
         fprintf('  Behavior ROIs loaded: %s\n', strjoin(beh_labels, ', '));
         beh_data = extract_roi_traces_multi(motion_file, [me_Y, me_X], me_T, beh_idx, opts.chunk_size_frames, 'behavior');
         Beh = struct();
         Beh.data = beh_data;
         Beh.labels = beh_labels;
-        Beh.pixel_counts = beh_pixels;
-        Beh.type = 'motion_energy';
         Beh.sample_rate = me_freq;
         Beh.time = build_time_vector(size(beh_data,1), me_freq);
-        Beh.n_samples = size(beh_data,1);
-        Beh.n_rois = size(beh_data,2);
-        Beh.traces_table = build_table(beh_data, beh_labels);
     end
 
     %% Assemble ROI struct
@@ -179,34 +166,17 @@ function ROI = rois_to_mat(fluo_file, motion_file, behav_roi_file, neural_roi_fi
     ROI.metadata = struct();
     ROI.metadata.created_by = mfilename;
     ROI.metadata.created_at = datestr(now, 31);
-    ROI.metadata.version = '3.0.0';
+    ROI.metadata.version = '4.0.0';
     ROI.metadata.source = struct('fluorescence_movie', fluo_file, ...
         'motion_movie', motion_file, 'neural_roi_file', roi_source_path, ...
         'behavior_roi_file', behav_roi_file, 'vascular_mask_file', vascular_mask_file, ...
         'brain_mask_file', brain_mask_file);
-    mods = {'fluorescence'};
-    if ~isempty(Beh)
-        mods{end+1} = 'behavior';
-    end
-    ROI.metadata.modalities = mods;
 
     ROI.modalities = struct();
     ROI.modalities.fluorescence = Fluo;
     if ~isempty(Beh)
         ROI.modalities.behavior = Beh;
     end
-
-    ROI.time = Fluo.time;
-    ROI.data = Fluo.data;
-    ROI.labels = Fluo.labels;
-    ROI.type = Fluo.type;
-    ROI.raw_data = Fluo.raw_data;
-    ROI.dff_params = Fluo.dff_params;
-    ROI.sample_rate = Fluo.sample_rate;
-    ROI.n_samples = Fluo.n_samples;
-    ROI.n_rois = Fluo.n_rois;
-    ROI.traces_table = Fluo.traces_table;
-    ROI.paths = ROI.metadata.source;
 
     if opts.SaveOutput
         save(opts.OutputFile, 'ROI', '-v7.3');
@@ -323,11 +293,10 @@ function roi_path = resolve_referenced_roi_file(base_file, roi_reference)
     error('Unable to resolve fluorescence ROI file "%s" referenced from %s.', roi_reference, base_file);
 end
 
-function [roi_idx, labels, pix_counts] = prepare_roi_indices(roi_info, mask_limit, dims)
+function [roi_idx, labels] = prepare_roi_indices_compact(roi_info, mask_limit, dims)
     n = numel(roi_info);
     roi_idx = cell(1, n);
     labels = cell(1, n);
-    pix_counts = zeros(1, n);
     keep = true(1, n);
     for i = 1:n
         labels{i} = char(roi_info(i).Name);
@@ -337,7 +306,6 @@ function [roi_idx, labels, pix_counts] = prepare_roi_indices(roi_info, mask_limi
         end
         mask = mask & mask_limit;
         idx = find(mask(:));
-        pix_counts(i) = numel(idx);
         if isempty(idx)
             warning('ROI %s has 0 pixels after masking and will be dropped.', labels{i});
             keep(i) = false;
@@ -347,7 +315,6 @@ function [roi_idx, labels, pix_counts] = prepare_roi_indices(roi_info, mask_limi
     end
     roi_idx = roi_idx(keep);
     labels = labels(keep);
-    pix_counts = pix_counts(keep);
 end
 
 function traces = extract_roi_traces_multi(dat_file, dims, n_frames, roi_idx, chunk_size, label)
@@ -387,15 +354,6 @@ function tv = build_time_vector(n_samples, Fs)
         tv = (0:n_samples-1)';
     else
         tv = (0:n_samples-1)' ./ Fs;
-    end
-end
-
-function tbl = build_table(data, labels)
-    try
-        tbl = array2table(data, 'VariableNames', sanitize_varnames(labels));
-    catch
-        tbl = array2table(data);
-        tbl.Properties.VariableNames = generate_default_labels(size(data,2));
     end
 end
 
