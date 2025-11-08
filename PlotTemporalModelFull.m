@@ -1,4 +1,4 @@
-﻿function PlotTemporalModelFull(results)
+function PlotTemporalModelFull(results)
 % PlotTemporalModelFull Generate diagnostic plots for TemporalModelFull results.
 %
 %   PlotTemporalModelFull(results)
@@ -58,7 +58,7 @@ function plot_all_temporal_kernels(results)
         % Mean line
         plot(tk.lag_times_sec, tk.beta_cv_mean, ...
             'LineWidth', 1.8, 'Color', colors(roi, :), ...
-            'DisplayName', sprintf('%s (R┬▓=%.2f%%)', roi_names{roi}, ...
+            'DisplayName', sprintf('%s (R^2=%.2f%%)', roi_names{roi}, ...
                 results.performance(roi).R2_cv_mean*100));
     end
 
@@ -84,11 +84,17 @@ function plot_all_temporal_kernels(results)
 end
 
 function plot_temporal_kernel_heatmap(results)
-    % Heatmap of temporal kernels: ROIs (rows) ├ù Lags (columns)
+    % Heatmap of temporal kernels: ROIs (rows) × Lags (columns)
 
-    beta_matrix = results.comparison.beta_matrix_cv';  % [n_rois ├ù n_lags]
-    roi_names = results.comparison.roi_names;
+    beta_matrix = results.comparison.beta_matrix_cv';  % [n_rois × n_lags]
+    roi_names = results.comparison.roi_names(:);
+    peak_lags = results.comparison.peak_lags_all_sec(:);
     lag_times = results.temporal_kernels(1).lag_times_sec;
+
+    % Sort ROIs by peak lag so predictive (negative) are at top
+    [~, sort_idx] = sort(peak_lags, 'ascend', 'MissingPlacement', 'last');
+    beta_matrix = beta_matrix(sort_idx, :);
+    roi_names = roi_names(sort_idx);
 
     fig_title = sprintf('Temporal Kernel Heatmap: %d ROIs vs %s', ...
         results.metadata.n_rois, results.metadata.behavior_predictor);
@@ -101,10 +107,10 @@ function plot_temporal_kernel_heatmap(results)
 
     % Center colormap on zero
     clim_max = max(abs(beta_matrix(:)));
-    clim([-clim_max, clim_max]);
+    caxis([-clim_max, clim_max]);
 
     xlabel('Lag time (seconds)', 'FontSize', 12);
-    ylabel('Neural ROI', 'FontSize', 12);
+    ylabel('Neural ROI (sorted by peak lag)', 'FontSize', 12);
     title(fig_title, 'FontSize', 14, 'Interpreter', 'none');
 
     % Y-axis labels
@@ -123,7 +129,7 @@ function plot_temporal_kernel_heatmap(results)
 end
 
 function plot_performance_comparison(results)
-    % Bar plot comparing R┬▓ across ROIs with error bars
+    % Bar plot comparing R^2 across ROIs with error bars
 
     n_rois = results.metadata.n_rois;
     roi_names = results.comparison.roi_names;
@@ -135,36 +141,48 @@ function plot_performance_comparison(results)
     fig_title = sprintf('Performance Comparison: %d ROIs vs %s', ...
         n_rois, results.metadata.behavior_predictor);
 
-    figure('Name', fig_title, 'Position', [200 100 1000 700]);
-    tiled = tiledlayout(2, 1, 'TileSpacing', 'compact', 'Padding', 'compact');
-    title(tiled, fig_title, 'Interpreter', 'none', 'FontSize', 14);
+    fig = figure('Name', fig_title, 'Position', [200 100 1000 700]);
+    use_tiled = exist('tiledlayout', 'file') == 2;
+    layout = [];
+    if use_tiled
+        layout = tiledlayout(2, 1, 'TileSpacing', 'compact', 'Padding', 'compact');
+    end
+    add_super_title(fig, layout, fig_title);
 
-    % Top panel: R┬▓ comparison
-    ax1 = nexttile(tiled);
+    % Top panel: R^2 comparison
+    if use_tiled
+        ax1 = nexttile(layout, 1);
+    else
+        ax1 = subplot(2, 1, 1);
+    end
     x_pos = 1:n_rois;
 
-    % Plot CV R┬▓ with error bars
-    b1 = bar(ax1, x_pos, R2_cv * 100, 'FaceColor', [0.3 0.5 0.8]);
+    % Plot CV R^2 with error bars
+    bar(ax1, x_pos, R2_cv * 100, 'FaceColor', [0.3 0.5 0.8]);
     hold(ax1, 'on');
     errorbar(ax1, x_pos, R2_cv * 100, R2_sem * 100, 'k.', 'LineWidth', 1.5, ...
         'CapSize', 5);
 
-    % Overlay full-data R┬▓ as dots
+    % Overlay full-data R^2 as dots
     plot(ax1, x_pos, R2_full * 100, 'ro', 'MarkerSize', 6, 'LineWidth', 1.5, ...
-        'DisplayName', 'R┬▓ (full-data)');
+        'DisplayName', 'R^2 (full-data)');
 
     hold(ax1, 'off');
 
-    ylabel(ax1, 'R┬▓ (%)', 'FontSize', 12);
+    ylabel(ax1, 'R^2 (%)', 'FontSize', 12);
     xticks(ax1, x_pos);
     xticklabels(ax1, roi_names);
     xtickangle(ax1, 45);
-    legend(ax1, {'R┬▓ (CV mean ┬▒ SEM)', '', 'R┬▓ (full-data)'}, 'Location', 'best');
+    legend(ax1, {'R^2 (CV mean +/- SEM)', 'R^2 (full-data)'}, 'Location', 'best');
     grid(ax1, 'on');
     title(ax1, 'Model Performance', 'FontSize', 12);
 
     % Bottom panel: Peak lag distribution
-    ax2 = nexttile(tiled);
+    if use_tiled
+        ax2 = nexttile(layout, 2);
+    else
+        ax2 = subplot(2, 1, 2);
+    end
 
     % Color bars by sign (predictive vs reactive)
     bar_colors = zeros(n_rois, 3);
@@ -198,12 +216,12 @@ function plot_performance_comparison(results)
 end
 
 function plot_multi_roi_predictions(results)
-    % Plot predictions for a subset of ROIs (top 4 by R┬▓)
+    % Plot predictions for a subset of ROIs (top 4 by R^2)
 
     meta = results.metadata;
     pred = results.predictions;
 
-    % Select top 4 ROIs by R┬▓
+    % Select top 4 ROIs by R^2
     R2_all = [results.performance.R2_cv_mean];
     [~, sorted_idx] = sort(R2_all, 'descend');
     n_plot = min(4, meta.n_rois);
@@ -217,16 +235,26 @@ function plot_multi_roi_predictions(results)
     fig_title = sprintf('Model Predictions: Top %d ROIs vs %s', ...
         n_plot, meta.behavior_predictor);
 
-    figure('Name', fig_title, 'Position', [250 50 1200 800]);
-    tiled = tiledlayout(n_plot + 1, 1, 'TileSpacing', 'compact', 'Padding', 'compact');
-    title(tiled, fig_title, 'Interpreter', 'none', 'FontSize', 14);
+    fig = figure('Name', fig_title, 'Position', [250 50 1200 800]);
+    use_tiled = exist('tiledlayout', 'file') == 2;
+    layout = [];
+    if use_tiled
+        layout = tiledlayout(n_plot + 1, 1, 'TileSpacing', 'compact', 'Padding', 'compact');
+    end
+    add_super_title(fig, layout, fig_title);
+    ax_handles = gobjects(n_plot + 1, 1);
 
     % Plot each ROI
     for i = 1:n_plot
         roi_idx = plot_indices(i);
         roi_name = meta.roi_names{roi_idx};
 
-        ax = nexttile(tiled);
+        if use_tiled
+            ax = nexttile(layout, i);
+        else
+            ax = subplot(n_plot + 1, 1, i);
+        end
+        ax_handles(i) = ax;
 
         % Actual vs predicted
         plot(ax, t_truncated, pred.Y_actual(:, roi_idx), 'Color', [0.2 0.2 0.8], ...
@@ -240,9 +268,9 @@ function plot_multi_roi_predictions(results)
         legend(ax, 'Location', 'best', 'FontSize', 8);
         grid(ax, 'on');
 
-        % Add R┬▓ annotation
+        % Add R^2 annotation
         text(ax, 0.02, 0.98, ...
-            sprintf('R┬▓(CV): %.2f%% ┬▒ %.2f%%', ...
+            sprintf('R^2 (CV): %.2f%% +/- %.2f%%', ...
                 results.performance(roi_idx).R2_cv_mean*100, ...
                 results.performance(roi_idx).R2_cv_sem*100), ...
             'Units', 'normalized', 'VerticalAlignment', 'top', ...
@@ -250,14 +278,19 @@ function plot_multi_roi_predictions(results)
     end
 
     % Bottom panel: Behavior trace
-    ax_behav = nexttile(tiled);
+    if use_tiled
+        ax_behav = nexttile(layout, n_plot + 1);
+    else
+        ax_behav = subplot(n_plot + 1, 1, n_plot + 1);
+    end
+    ax_handles(end) = ax_behav;
     t_full = (0:(length(pred.behavior_trace_z)-1)) / meta.sampling_rate;
     plot(ax_behav, t_full, pred.behavior_trace_z, 'Color', [0.13 0.55 0.13]);
     ylabel(ax_behav, sprintf('%s (z)', meta.behavior_predictor), 'Interpreter', 'none');
     xlabel(ax_behav, 'Time (s)');
     grid(ax_behav, 'on');
 
-    linkaxes([tiled.Children], 'x');
+    linkaxes(ax_handles, 'x');
 end
 
 function plot_peak_beta_brainmaps(results)
@@ -316,6 +349,7 @@ function plot_peak_beta_brainmaps(results)
     target_names = results.comparison.roi_names;
     peak_lags = results.comparison.peak_lags_all_sec;
     peak_betas = results.comparison.peak_betas_all;
+    cv_r2_all = [results.performance.R2_cv_mean];
     if numel(target_names) ~= numel(peak_lags) || numel(peak_lags) ~= numel(peak_betas)
         warning('TemporalModelFull:MismatchLength', ...
             'Mismatch in comparison arrays; skipping brain maps.');
@@ -324,6 +358,7 @@ function plot_peak_beta_brainmaps(results)
 
     lag_map = nan(dims);
     beta_map = nan(dims);
+    r2_map = nan(dims);
     cat_map = zeros(dims, 'uint8');  % 0 = background
     n_assigned = 0;
     n_skipped = 0;
@@ -349,7 +384,8 @@ function plot_peak_beta_brainmaps(results)
 
         lag_val = peak_lags(i);
         beta_val = peak_betas(i);
-        if isnan(lag_val) || isnan(beta_val)
+        r2_val = cv_r2_all(i) * 100;  % express as %
+        if isnan(lag_val) || isnan(beta_val) || isnan(r2_val)
             n_skipped = n_skipped + 1;
             continue;
         end
@@ -362,6 +398,7 @@ function plot_peak_beta_brainmaps(results)
 
         lag_map(mask) = lag_val;
         beta_map(mask) = beta_val;
+        r2_map(mask) = r2_val;
         if lag_val < 0 && beta_val >= 0
             cat_map(mask) = 1;  % predictive facilitatory
         elseif lag_val < 0 && beta_val < 0
@@ -390,6 +427,7 @@ function plot_peak_beta_brainmaps(results)
     mask_shape = brain_mask & ~vascular_mask;
     lag_map(~mask_shape) = nan;
     beta_map(~mask_shape) = nan;
+    r2_map(~mask_shape) = nan;
     cat_map(~mask_shape) = 0;
 
     base_rgb = build_mask_background(mask_shape);
@@ -408,34 +446,65 @@ function plot_peak_beta_brainmaps(results)
     if isempty(beta_abs) || beta_abs == 0
         beta_abs = 1;
     end
+    r2_valid = r2_map(~isnan(r2_map));
+    if isempty(r2_valid)
+        r2_limits = [0 1];
+    else
+        r2_limits = [0 max(r2_valid)];
+    end
 
-    figure('Name', 'Temporal Peak Metrics Brain Maps', ...
-        'Position', [200 100 1500 550]);
-    tiled = tiledlayout(1, 3, 'TileSpacing', 'compact', 'Padding', 'compact');
-    title_str = sprintf('Peak Lag/Beta Spatial Maps (n=%d, skipped=%d)', ...
+    fig = figure('Name', 'Temporal Peak Metrics Brain Maps', ...
+        'Position', [200 100 1500 800]);
+    use_tiled = exist('tiledlayout', 'file') == 2;
+    layout = [];
+    if use_tiled
+        layout = tiledlayout(2, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
+    end
+    title_str = sprintf('Peak Lag/Beta/R^2 Spatial Maps (n=%d, skipped=%d)', ...
         n_assigned, n_skipped);
-    title(tiled, title_str, 'FontSize', 14);
+    add_super_title(fig, layout, title_str);
 
     % Lag map (diverging)
     cmap_lag = redbluecmap(256);
-    ax1 = nexttile(tiled);
+    if use_tiled
+        ax1 = nexttile(layout, 1);
+    else
+        ax1 = subplot(2, 2, 1);
+    end
     plot_metric_map(ax1, base_rgb, lag_map, cmap_lag, lag_limits, ...
         sprintf('Peak Lag (s)\nPredictive < 0, Reactive > 0'), mask_shape);
 
     % |beta| map
     abs_beta_map = abs(beta_map);
-    ax2 = nexttile(tiled);
+    if use_tiled
+        ax2 = nexttile(layout, 2);
+    else
+        ax2 = subplot(2, 2, 2);
+    end
     plot_metric_map(ax2, base_rgb, abs_beta_map, parula(256), [0, beta_abs], ...
         'Peak |Beta| (a.u.)', mask_shape);
 
     % Categorical map
-    ax3 = nexttile(tiled);
+    if use_tiled
+        ax3 = nexttile(layout, 3);
+    else
+        ax3 = subplot(2, 2, 3);
+    end
     category_colors = [0.35 0.65 1.0; 0.0 0.45 0.9; ...
         1.0 0.6 0.3; 0.8 0.2 0.2];
     plot_metric_map(ax3, base_rgb, cat_map, category_colors, [0.5 4.5], ...
         'Lag/Beta Quadrants', mask_shape, true);
 
     add_category_legend(ax3);
+
+    % CV R^2 map
+    if use_tiled
+        ax4 = nexttile(layout, 4);
+    else
+        ax4 = subplot(2, 2, 4);
+    end
+    plot_metric_map(ax4, base_rgb, r2_map, hot(256), r2_limits, ...
+        'CV R^2 (%)', mask_shape);
 end
 
 function mask = load_optional_mask(source, field_name, dims)
@@ -521,6 +590,19 @@ function plot_mask_outline(ax, mask_shape)
     contour(ax, mask_shape, [0.5 0.5], 'Color', [1 1 1], 'LineWidth', 1.2);
 end
 
+function add_super_title(fig_handle, layout_handle, title_str)
+    if nargin >= 2 && ~isempty(layout_handle)
+        title(layout_handle, title_str, 'FontSize', 14, 'Interpreter', 'none');
+    elseif exist('sgtitle', 'file') == 2
+        figure(fig_handle);
+        sgtitle(title_str, 'Interpreter', 'none', 'FontSize', 14);
+    else
+        annotation(fig_handle, 'textbox', [0 0.95 1 0.04], ...
+            'String', title_str, 'HorizontalAlignment', 'center', ...
+            'EdgeColor', 'none', 'FontSize', 14, 'Interpreter', 'none');
+    end
+end
+
 function cmap = redbluecmap(m)
     % Generate red-white-blue colormap centered on zero
     if nargin < 1
@@ -534,4 +616,16 @@ function cmap = redbluecmap(m)
 
     cmap = [r, g, b];
 end
+
+
+
+
+
+
+
+
+
+
+
+
 
