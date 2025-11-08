@@ -27,60 +27,49 @@ end
 %% ================= Plotting Functions =================
 
 function plot_all_temporal_kernels(results)
-    % Plot all temporal kernels overlaid with color-coding
+    % Plot predictive vs reactive group mean kernels with SEM shading
 
-    n_rois = results.metadata.n_rois;
-    roi_names = results.metadata.roi_names;
+    tk = results.temporal_kernels;
+    n_rois = numel(tk);
+    lag_times = tk(1).lag_times_sec;
+    n_lags = numel(lag_times);
 
-    fig_title = sprintf('All Temporal Kernels: %d ROIs vs %s', ...
-        n_rois, results.metadata.behavior_predictor);
-
-    figure('Name', fig_title, 'Position', [100 100 1000 700]);
-
-    hold on;
-
-    % Generate distinct colors for each ROI
-    colors = lines(n_rois);
-
-    % Plot each ROI's temporal kernel
+    beta_matrix = zeros(n_lags, n_rois);
     for roi = 1:n_rois
-        tk = results.temporal_kernels(roi);
-
-        % SEM envelope (semi-transparent)
-        sem_upper = tk.beta_cv_mean + tk.beta_cv_sem;
-        sem_lower = tk.beta_cv_mean - tk.beta_cv_sem;
-
-        fill([tk.lag_times_sec; flipud(tk.lag_times_sec)], ...
-             [sem_upper; flipud(sem_lower)], colors(roi, :), ...
-             'FaceAlpha', 0.1, 'EdgeColor', 'none', ...
-             'HandleVisibility', 'off');
-
-        % Mean line
-        plot(tk.lag_times_sec, tk.beta_cv_mean, ...
-            'LineWidth', 1.8, 'Color', colors(roi, :), ...
-            'DisplayName', sprintf('%s (R^2=%.2f%%)', roi_names{roi}, ...
-                results.performance(roi).R2_cv_mean*100));
+        beta_matrix(:, roi) = tk(roi).beta_cv_mean;
     end
 
-    % Reference lines
+    peak_lags = results.comparison.peak_lags_all_sec(:);
+    predictive_mask = peak_lags < 0;
+    reactive_mask = peak_lags >= 0;
+
+    [pred_mean, pred_sem] = compute_group_curve(beta_matrix, predictive_mask);
+    [reac_mean, reac_sem] = compute_group_curve(beta_matrix, reactive_mask);
+
+    fig_title = sprintf('Temporal Kernels (Group Means): Predictive vs Reactive (%s)', ...
+        results.metadata.behavior_predictor);
+
+    figure('Name', fig_title, 'Position', [100 100 900 600]);
+    hold on;
+
+    colors = struct('predictive', [0.2 0.45 0.9], 'reactive', [0.9 0.45 0.2]);
+
+    plot_group_curve(lag_times, pred_mean, pred_sem, colors.predictive, ...
+        sprintf('Predictive (n=%d)', sum(predictive_mask)));
+    plot_group_curve(lag_times, reac_mean, reac_sem, colors.reactive, ...
+        sprintf('Reactive (n=%d)', sum(reactive_mask)));
+
+    plot(xlim, [0 0], 'k--', 'LineWidth', 1, 'HandleVisibility', 'off');
     yl = ylim;
-    plot([min(tk.lag_times_sec), max(tk.lag_times_sec)], [0 0], ...
-        'k--', 'LineWidth', 1, 'HandleVisibility', 'off');
-    plot([0, 0], yl, 'k:', 'LineWidth', 1.5, 'HandleVisibility', 'off');
+    plot([0 0], yl, 'k:', 'LineWidth', 1.5, 'HandleVisibility', 'off');
 
     hold off;
 
     xlabel('Lag time (seconds)', 'FontSize', 13);
     ylabel('Beta coefficient (z-scored)', 'FontSize', 13);
     title(fig_title, 'FontSize', 15, 'Interpreter', 'none');
-    legend('Location', 'bestoutside', 'FontSize', 9);
+    legend('Location', 'best', 'FontSize', 10);
     grid on;
-
-    % Add region labels
-    text(min(tk.lag_times_sec)*0.8, yl(2)*0.95, 'Predictive', ...
-        'HorizontalAlignment', 'center', 'FontSize', 12, 'Color', [0.3 0.2 0.2]);
-    text(max(tk.lag_times_sec)*0.8, yl(2)*0.95, 'Reactive', ...
-        'HorizontalAlignment', 'center', 'FontSize', 12, 'Color', [0.2 0.2 0.2]);
 end
 
 function plot_temporal_kernel_heatmap(results)
@@ -126,6 +115,34 @@ function plot_temporal_kernel_heatmap(results)
     cb = colorbar;
     cb.Label.String = 'Beta coefficient (z-scored)';
     cb.Label.FontSize = 11;
+end
+
+function [mean_curve, sem_curve] = compute_group_curve(beta_matrix, mask)
+    if nargin < 2 || isempty(mask) || all(~mask)
+        mean_curve = [];
+        sem_curve = [];
+        return;
+    end
+    group_data = beta_matrix(:, mask);
+    mean_curve = mean(group_data, 2, 'omitnan');
+    n = sum(mask);
+    if n > 1
+        sem_curve = std(group_data, 0, 2, 'omitnan') ./ sqrt(n);
+    else
+        sem_curve = zeros(size(mean_curve));
+    end
+end
+
+function plot_group_curve(lag_times, mean_curve, sem_curve, color_val, label_str)
+    if isempty(mean_curve)
+        return;
+    end
+    upper = mean_curve + sem_curve;
+    lower = mean_curve - sem_curve;
+    fill([lag_times; flipud(lag_times)], [upper; flipud(lower)], color_val, ...
+        'FaceAlpha', 0.15, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+    plot(lag_times, mean_curve, 'Color', color_val, 'LineWidth', 2, ...
+        'DisplayName', label_str);
 end
 
 function plot_performance_comparison(results)
@@ -216,24 +233,39 @@ function plot_performance_comparison(results)
 end
 
 function plot_multi_roi_predictions(results)
-    % Plot predictions for a subset of ROIs (top 4 by R^2)
+    % Plot best vs worst ROI predictions (top 2 vs bottom 2 by R^2)
 
     meta = results.metadata;
     pred = results.predictions;
 
-    % Select top 4 ROIs by R^2
     R2_all = [results.performance.R2_cv_mean];
-    [~, sorted_idx] = sort(R2_all, 'descend');
-    n_plot = min(4, meta.n_rois);
-    plot_indices = sorted_idx(1:n_plot);
+    [~, desc_idx] = sort(R2_all, 'descend');
+    [~, asc_idx] = sort(R2_all, 'ascend');
+
+    n_best = min(2, meta.n_rois);
+    n_worst = min(2, max(meta.n_rois - n_best, 0));
+
+    best_idx = desc_idx(1:n_best);
+    worst_candidates = setdiff(asc_idx, best_idx, 'stable');
+    worst_idx = worst_candidates(1:min(n_worst, numel(worst_candidates)));
+
+    plot_indices = [best_idx(:); worst_idx(:)];
+    group_flags = [repmat({'Best'}, numel(best_idx), 1); ...
+                   repmat({'Worst'}, numel(worst_idx), 1)];
+    n_plot = numel(plot_indices);
+    if n_plot == 0
+        warning('plot_multi_roi_predictions:NoROIs', ...
+            'Unable to select ROIs for prediction plot.');
+        return;
+    end
 
     % Time vector for truncated data
     n_valid = meta.n_timepoints_used;
     n_lost_start = meta.n_timepoints_lost_start;
     t_truncated = (n_lost_start:(n_lost_start + n_valid - 1)) / meta.sampling_rate;
 
-    fig_title = sprintf('Model Predictions: Top %d ROIs vs %s', ...
-        n_plot, meta.behavior_predictor);
+    fig_title = sprintf('Model Predictions: Best/ Worst ROIs vs %s', ...
+        meta.behavior_predictor);
 
     fig = figure('Name', fig_title, 'Position', [250 50 1200 800]);
     use_tiled = exist('tiledlayout', 'file') == 2;
@@ -247,6 +279,7 @@ function plot_multi_roi_predictions(results)
     % Plot each ROI
     for i = 1:n_plot
         roi_idx = plot_indices(i);
+        roi_tag = group_flags{i};
         roi_name = meta.roi_names{roi_idx};
 
         if use_tiled
@@ -264,13 +297,15 @@ function plot_multi_roi_predictions(results)
             'LineWidth', 1.25, 'DisplayName', 'Prediction');
         hold(ax, 'off');
 
+        title(ax, sprintf('%s ROI: %s', roi_tag, roi_name), 'Interpreter', 'none', ...
+            'FontSize', 11);
         ylabel(ax, sprintf('%s (z)', roi_name), 'Interpreter', 'none', 'FontSize', 10);
         legend(ax, 'Location', 'best', 'FontSize', 8);
         grid(ax, 'on');
 
         % Add R^2 annotation
         text(ax, 0.02, 0.98, ...
-            sprintf('R^2 (CV): %.2f%% +/- %.2f%%', ...
+            sprintf('%s R^2 (CV): %.2f%% +/- %.2f%%', roi_tag, ...
                 results.performance(roi_idx).R2_cv_mean*100, ...
                 results.performance(roi_idx).R2_cv_sem*100), ...
             'Units', 'normalized', 'VerticalAlignment', 'top', ...
