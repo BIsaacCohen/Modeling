@@ -33,6 +33,7 @@ function results = TemporalModelFull(ROI, opts)
 %       save_results         - Save results to file (default true)
 %       show_plots           - Generate diagnostic plots (default true)
 %       poster_plots         - Use poster-quality plots instead (default false)
+%       no_category_plots    - Skip predictive/reactive categorization in plots (default false)
 %       prediction_rois      - {1x2} ROI names for poster predictions (default: {'M1_L','V1_L'})
 %       peak_metric          - Metric for classification: 'peak' or 'com' (default 'peak')
 %       analysis_window_sec  - Time window for peak/CoM search in seconds (default 1.0)
@@ -85,6 +86,7 @@ defaults = struct(...
     'save_results', true, ...
     'show_plots', true, ...
     'poster_plots', false, ...
+    'no_category_plots', false, ...
     'peak_metric', 'peak', ...
     'analysis_window_sec', 1.0);
 
@@ -506,7 +508,11 @@ end
 %% 12. Generate plots
 if opts.show_plots
     if opts.poster_plots
-        PlotPosterTemporalModelFull(results, opts);
+        if opts.no_category_plots
+            PlotPosterNoCategoryTemporalModelFull(results, opts);
+        else
+            PlotPosterTemporalModelFull(results, opts);
+        end
     else
         PlotTemporalModelFull(results);
     end
