@@ -32,6 +32,8 @@ function results = TemporalModelFull(ROI, opts)
 %       output_file          - Where to save results .mat (default: auto-generated)
 %       save_results         - Save results to file (default true)
 %       show_plots           - Generate diagnostic plots (default true)
+%       poster_plots         - Use poster-quality plots instead (default false)
+%       prediction_rois      - {1x2} ROI names for poster predictions (default: {'M1_L','V1_L'})
 %
 %   OUTPUTS (results struct):
 %       temporal_kernels    - [n_ROIs × 1] struct array with fields:
@@ -79,7 +81,8 @@ defaults = struct(...
     'cv_folds', 5, ...
     'output_file', '', ...
     'save_results', true, ...
-    'show_plots', true);
+    'show_plots', true, ...
+    'poster_plots', false);
 
 opts = populate_defaults(opts, defaults);
 
@@ -342,18 +345,34 @@ fprintf('\nComputing temporal kernel statistics for each ROI...\n');
 beta_cv_mean_all = mean(beta_cv_folds, 3);  % [n_lags × n_rois]
 beta_cv_sem_all = std(beta_cv_folds, 0, 3) / sqrt(cv_folds);  % [n_lags × n_rois]
 
-% Find peak response for each ROI (from CV mean)
+% Find peak response for each ROI (from CV mean) within -1 to +1s window
 peak_lags_frames = zeros(n_rois, 1);
 peak_lags_sec = zeros(n_rois, 1);
 peak_betas = zeros(n_rois, 1);
 peak_betas_sem = zeros(n_rois, 1);
 
+% Define peak search window (-1 to +1 seconds)
+peak_search_window_sec = 1.0;
+window_mask = abs(lag_times_sec) <= peak_search_window_sec;
+
+fprintf('  Peak search restricted to %.1f to +%.1f seconds (%d/%d lags)\n', ...
+    -peak_search_window_sec, peak_search_window_sec, sum(window_mask), length(lag_times_sec));
+
 for roi = 1:n_rois
-    [peak_beta_abs, peak_idx] = max(abs(beta_cv_mean_all(:, roi)));
-    peak_lags_frames(roi) = lag_values(peak_idx);
-    peak_lags_sec(roi) = lag_times_sec(peak_idx);
-    peak_betas(roi) = beta_cv_mean_all(peak_idx, roi);
-    peak_betas_sem(roi) = beta_cv_sem_all(peak_idx, roi);
+    % Restrict search to window
+    beta_in_window = beta_cv_mean_all(window_mask, roi);
+    lag_times_in_window = lag_times_sec(window_mask);
+
+    [peak_beta_val, peak_idx_window] = max(beta_in_window);
+
+    peak_lags_sec(roi) = lag_times_in_window(peak_idx_window);
+    peak_lags_frames(roi) = round(peak_lags_sec(roi) * sampling_rate);
+    peak_betas(roi) = peak_beta_val;
+
+    % Find the actual index in the full array for SEM
+    window_indices = find(window_mask);
+    actual_idx = window_indices(peak_idx_window);
+    peak_betas_sem(roi) = beta_cv_sem_all(actual_idx, roi);
 end
 
 %% 11. Assemble results structure
@@ -429,7 +448,11 @@ end
 
 %% 12. Generate plots
 if opts.show_plots
-    PlotTemporalModelFull(results);
+    if opts.poster_plots
+        PlotPosterTemporalModelFull(results, opts);
+    else
+        PlotTemporalModelFull(results);
+    end
 end
 
 %% 13. Save results
