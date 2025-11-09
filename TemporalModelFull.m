@@ -34,6 +34,8 @@ function results = TemporalModelFull(ROI, opts)
 %       show_plots           - Generate diagnostic plots (default true)
 %       poster_plots         - Use poster-quality plots instead (default false)
 %       prediction_rois      - {1x2} ROI names for poster predictions (default: {'M1_L','V1_L'})
+%       peak_metric          - Metric for classification: 'peak' or 'com' (default 'peak')
+%       analysis_window_sec  - Time window for peak/CoM search in seconds (default 1.0)
 %
 %   OUTPUTS (results struct):
 %       temporal_kernels    - [n_ROIs × 1] struct array with fields:
@@ -82,9 +84,16 @@ defaults = struct(...
     'output_file', '', ...
     'save_results', true, ...
     'show_plots', true, ...
-    'poster_plots', false);
+    'poster_plots', false, ...
+    'peak_metric', 'peak', ...
+    'analysis_window_sec', 1.0);
 
 opts = populate_defaults(opts, defaults);
+
+% Validate peak_metric option
+if ~ismember(opts.peak_metric, {'peak', 'com'})
+    error('opts.peak_metric must be either ''peak'' or ''com'' (center of mass)');
+end
 
 % Validate ROI structure
 validate_roi_structure(ROI);
@@ -345,34 +354,70 @@ fprintf('\nComputing temporal kernel statistics for each ROI...\n');
 beta_cv_mean_all = mean(beta_cv_folds, 3);  % [n_lags × n_rois]
 beta_cv_sem_all = std(beta_cv_folds, 0, 3) / sqrt(cv_folds);  % [n_lags × n_rois]
 
-% Find peak response for each ROI (from CV mean) within -1 to +1s window
-peak_lags_frames = zeros(n_rois, 1);
-peak_lags_sec = zeros(n_rois, 1);
-peak_betas = zeros(n_rois, 1);
-peak_betas_sem = zeros(n_rois, 1);
+% Calculate both peak and center of mass metrics for each ROI within -1 to +1s window
+% Storage for both metrics
+peak_method_lags_frames = zeros(n_rois, 1);
+peak_method_lags_sec = zeros(n_rois, 1);
+peak_method_betas = zeros(n_rois, 1);
+peak_method_betas_sem = zeros(n_rois, 1);
 
-% Define peak search window (-1 to +1 seconds)
-peak_search_window_sec = 1.0;
-window_mask = abs(lag_times_sec) <= peak_search_window_sec;
+com_method_lags_sec = zeros(n_rois, 1);
+com_method_lags_frames = zeros(n_rois, 1);
 
-fprintf('  Peak search restricted to %.1f to +%.1f seconds (%d/%d lags)\n', ...
-    -peak_search_window_sec, peak_search_window_sec, sum(window_mask), length(lag_times_sec));
+% Define analysis window (configurable via opts.analysis_window_sec)
+analysis_window_sec = opts.analysis_window_sec;
+window_mask = abs(lag_times_sec) <= analysis_window_sec;
+
+fprintf('  Response metric: %s\n', opts.peak_metric);
+fprintf('  Analysis window: %.1f to +%.1f seconds (%d/%d lags)\n', ...
+    -analysis_window_sec, analysis_window_sec, sum(window_mask), length(lag_times_sec));
 
 for roi = 1:n_rois
-    % Restrict search to window
+    % Restrict to analysis window
     beta_in_window = beta_cv_mean_all(window_mask, roi);
     lag_times_in_window = lag_times_sec(window_mask);
 
+    % Method 1: Peak (maximum positive beta)
     [peak_beta_val, peak_idx_window] = max(beta_in_window);
-
-    peak_lags_sec(roi) = lag_times_in_window(peak_idx_window);
-    peak_lags_frames(roi) = round(peak_lags_sec(roi) * sampling_rate);
-    peak_betas(roi) = peak_beta_val;
+    peak_method_lags_sec(roi) = lag_times_in_window(peak_idx_window);
+    peak_method_lags_frames(roi) = round(peak_method_lags_sec(roi) * sampling_rate);
+    peak_method_betas(roi) = peak_beta_val;
 
     % Find the actual index in the full array for SEM
     window_indices = find(window_mask);
     actual_idx = window_indices(peak_idx_window);
-    peak_betas_sem(roi) = beta_cv_sem_all(actual_idx, roi);
+    peak_method_betas_sem(roi) = beta_cv_sem_all(actual_idx, roi);
+
+    % Method 2: Center of Mass (weighted average of positive betas)
+    positive_beta = max(beta_in_window, 0);  % Only positive weights
+    total_weight = sum(positive_beta);
+
+    if total_weight > 0
+        com_method_lags_sec(roi) = sum(lag_times_in_window .* positive_beta) / total_weight;
+        com_method_lags_frames(roi) = round(com_method_lags_sec(roi) * sampling_rate);
+    else
+        % No positive response - default to zero
+        com_method_lags_sec(roi) = 0;
+        com_method_lags_frames(roi) = 0;
+    end
+end
+
+% Select which metric to use for classification based on opts.peak_metric
+if strcmp(opts.peak_metric, 'peak')
+    peak_lags_sec = peak_method_lags_sec;
+    peak_lags_frames = peak_method_lags_frames;
+    peak_betas = peak_method_betas;
+    peak_betas_sem = peak_method_betas_sem;
+else  % 'com'
+    peak_lags_sec = com_method_lags_sec;
+    peak_lags_frames = com_method_lags_frames;
+    % For CoM, we need to find beta at that time point
+    for roi = 1:n_rois
+        % Find closest lag time to CoM
+        [~, closest_idx] = min(abs(lag_times_sec - com_method_lags_sec(roi)));
+        peak_betas(roi) = beta_cv_mean_all(closest_idx, roi);
+        peak_betas_sem(roi) = beta_cv_sem_all(closest_idx, roi);
+    end
 end
 
 %% 11. Assemble results structure
@@ -388,10 +433,19 @@ for roi = 1:n_rois
     results.temporal_kernels(roi).beta_cv_folds = squeeze(beta_cv_folds(:, roi, :));  % [n_lags × n_folds]
     results.temporal_kernels(roi).lag_indices = lag_values;
     results.temporal_kernels(roi).lag_times_sec = lag_times_sec;
+
+    % Primary metric (selected by opts.peak_metric)
     results.temporal_kernels(roi).peak_lag_frames = peak_lags_frames(roi);
     results.temporal_kernels(roi).peak_lag_sec = peak_lags_sec(roi);
     results.temporal_kernels(roi).peak_beta = peak_betas(roi);
     results.temporal_kernels(roi).peak_beta_sem = peak_betas_sem(roi);
+
+    % Both metrics stored separately for comparison
+    results.temporal_kernels(roi).peak_method_lag_sec = peak_method_lags_sec(roi);
+    results.temporal_kernels(roi).peak_method_lag_frames = peak_method_lags_frames(roi);
+    results.temporal_kernels(roi).com_method_lag_sec = com_method_lags_sec(roi);
+    results.temporal_kernels(roi).com_method_lag_frames = com_method_lags_frames(roi);
+    results.temporal_kernels(roi).peak_com_difference_sec = abs(peak_method_lags_sec(roi) - com_method_lags_sec(roi));
 end
 
 % --- Per-ROI performance metrics ---
@@ -415,6 +469,7 @@ results.comparison.beta_matrix_cv = beta_cv_mean_all;       % [n_lags × n_rois]
 results.comparison.R2_all_rois = R2_cv_mean';               % [1 × n_rois]
 results.comparison.peak_lags_all_sec = peak_lags_sec';      % [1 × n_rois]
 results.comparison.peak_betas_all = peak_betas';            % [1 × n_rois]
+results.comparison.peak_method_betas_all = peak_method_betas';  % [1 × n_rois] - Always actual peak beta
 
 % --- Predictions (from full-data model) ---
 results.predictions = struct();
@@ -437,6 +492,8 @@ results.metadata.n_timepoints_used = n_valid;
 results.metadata.n_timepoints_lost_start = n_frames_lost_start;
 results.metadata.n_timepoints_lost_end = n_frames_lost_end;
 results.metadata.cv_folds = cv_folds;
+results.metadata.peak_metric = opts.peak_metric;
+results.metadata.analysis_window_sec = analysis_window_sec;
 results.metadata.timestamp = datestr(now);
 results.metadata.diagnostics = struct('max_correlation', max_corr, ...
     'mean_correlation', mean_corr, 'condition_number', condition_num);

@@ -65,8 +65,14 @@ function plot_all_temporal_kernels(results)
     [pred_mean, pred_sem] = compute_group_curve(beta_matrix, predictive_mask);
     [reac_mean, reac_sem] = compute_group_curve(beta_matrix, reactive_mask);
 
-    fig_title = sprintf('Temporal Kernels (Group Means): Predictive vs Reactive (%s)', ...
-        results.metadata.behavior_predictor);
+    % Determine metric for title
+    metric_str = 'Peak';
+    if isfield(results.metadata, 'peak_metric') && strcmp(results.metadata.peak_metric, 'com')
+        metric_str = 'CoM';
+    end
+
+    fig_title = sprintf('Temporal Kernels (Group Means): Predictive vs Reactive (%s, %s)', ...
+        results.metadata.behavior_predictor, metric_str);
 
     figure('Name', fig_title, 'Position', [100 500 900 600]);
     hold on;
@@ -117,8 +123,14 @@ function plot_temporal_kernel_heatmap(results)
     clim_max = max(abs(beta_matrix(:)));
     caxis([-clim_max, clim_max]);
 
+    % Determine metric label
+    metric_label = 'peak lag';
+    if isfield(results.metadata, 'peak_metric') && strcmp(results.metadata.peak_metric, 'com')
+        metric_label = 'center of mass';
+    end
+
     xlabel('Lag time (seconds)', 'FontSize', 13);
-    ylabel('Neural ROI (sorted by peak lag)', 'FontSize', 13);
+    ylabel(sprintf('Neural ROI (sorted by %s)', metric_label), 'FontSize', 13);
     title(fig_title, 'FontSize', 16, 'Interpreter', 'none');
 
     % Y-axis labels
@@ -314,7 +326,14 @@ function plot_peak_beta_brainmaps_poster(results)
 
     target_names = results.comparison.roi_names;
     peak_lags = results.comparison.peak_lags_all_sec;
-    peak_betas = results.comparison.peak_betas_all;
+
+    % Use actual peak beta for brain map (not CoM beta if CoM metric enabled)
+    if isfield(results.comparison, 'peak_method_betas_all')
+        peak_betas = results.comparison.peak_method_betas_all;
+    else
+        peak_betas = results.comparison.peak_betas_all;  % Fallback for old results
+    end
+
     cv_r2_all = [results.performance.R2_cv_mean];
     if numel(target_names) ~= numel(peak_lags) || numel(peak_lags) ~= numel(peak_betas)
         warning('PlotPosterTemporalModelFull:MismatchLength', ...
@@ -416,7 +435,14 @@ function plot_peak_beta_brainmaps_poster(results)
     if use_tiled
         layout = tiledlayout(1, 3, 'TileSpacing', 'compact', 'Padding', 'compact');
     end
-    title_str = sprintf('Temporal Kernel Spatial Summary (n=%d ROIs)', n_assigned);
+
+    % Determine metric for title
+    metric_str = 'Peak';
+    if isfield(results.metadata, 'peak_metric') && strcmp(results.metadata.peak_metric, 'com')
+        metric_str = 'CoM';
+    end
+
+    title_str = sprintf('Temporal Kernel Spatial Summary (n=%d ROIs, %s)', n_assigned, metric_str);
     add_super_title(fig, layout, title_str);
 
     % Panel 1: Lag map (diverging)
@@ -427,9 +453,9 @@ function plot_peak_beta_brainmaps_poster(results)
         ax1 = subplot(1, 3, 1);
     end
     plot_metric_map(ax1, base_rgb, lag_map, cmap_lag, lag_limits, ...
-        sprintf('Peak Lag (s)\nPredictive < 0, Reactive > 0'), mask_shape);
+        sprintf('%s Lag (s)\nPredictive < 0, Reactive > 0', metric_str), mask_shape);
 
-    % Panel 2: |beta| map
+    % Panel 2: |beta| map (always uses actual peak, not CoM)
     abs_beta_map = abs(beta_map);
     if use_tiled
         ax2 = nexttile(layout, 2);
