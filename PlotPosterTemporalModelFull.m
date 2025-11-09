@@ -531,9 +531,12 @@ function mask = load_optional_mask(source, field_name, dims)
     end
 end
 
-function plot_metric_map(ax, base_rgb, metric_map, cmap, clim, ttl, mask_shape, is_categorical)
-    if nargin < 8
+function plot_metric_map(ax, base_rgb, metric_map, cmap, clim, ttl, mask_shape, is_categorical, draw_mask_outline)
+    if nargin < 8 || isempty(is_categorical)
         is_categorical = false;
+    end
+    if nargin < 9 || isempty(draw_mask_outline)
+        draw_mask_outline = false;
     end
     axes(ax);
     cla(ax);
@@ -558,14 +561,16 @@ function plot_metric_map(ax, base_rgb, metric_map, cmap, clim, ttl, mask_shape, 
         cb = colorbar(ax);
         cb.FontSize = 11;
     end
-    plot_mask_outline(ax, mask_shape);
+    if draw_mask_outline
+        plot_mask_outline(ax, mask_shape);
+    end
     hold(ax, 'off');
     title(ax, ttl, 'FontSize', 16, 'FontWeight', 'bold');
 end
 
 function base_rgb = build_mask_background(mask_shape)
-    base_gray = 0.08 * ones(size(mask_shape));
-    base_gray(mask_shape) = 0.25;
+    % Draw all background pixels as black (mask outline provides context)
+    base_gray = zeros(size(mask_shape));
     base_rgb = repmat(base_gray, 1, 1, 3);
 end
 
