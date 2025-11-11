@@ -15,7 +15,7 @@ function PlotPosterTemporalModelFull(results, opts)
 %       1. Group mean temporal kernels (Predictive vs Reactive)
 %       2. Sorted temporal kernel heatmap (ROIs x Lags)
 %       3. Model predictions for 2 selected ROIs + behavior trace
-%       4. Brain maps (1x3 horizontal): Peak Lag | |Beta| | CV R²
+%       4. Brain maps (1x3 horizontal): Peak Lag | Beta | CV R²
 %
 %   Optimized for poster presentation with larger fonts and cleaner layouts
 %   compared to the diagnostic version (PlotTemporalModelFull.m).
@@ -259,8 +259,8 @@ function plot_multi_roi_predictions_poster(results, target_roi_names)
     end
     ax_handles(3) = ax_behav;
 
-    t_full = (0:(length(pred.behavior_trace_z)-1)) / meta.sampling_rate;
-    plot(ax_behav, t_full, pred.behavior_trace_z, 'Color', [0.13 0.55 0.13], ...
+    t_behavior = (n_lost_start:(n_lost_start + n_valid - 1)) / meta.sampling_rate;
+    plot(ax_behav, t_behavior, pred.behavior_trace_z, 'Color', [0.13 0.55 0.13], ...
         'LineWidth', 1.5);
     ylabel(ax_behav, sprintf('%s (z)', meta.behavior_predictor), ...
         'Interpreter', 'none', 'FontSize', 13);
@@ -416,10 +416,12 @@ function plot_peak_beta_brainmaps_poster(results)
     end
     lag_limits = [-lag_span, lag_span];
 
-    beta_abs = max(abs(peak_betas(~isnan(peak_betas))));
-    if isempty(beta_abs) || beta_abs == 0
-        beta_abs = 1;
+    beta_vals = beta_map(~isnan(beta_map));
+    beta_max = max(beta_vals);
+    if isempty(beta_vals) || beta_max == 0
+        beta_max = 1;
     end
+    beta_limits = [0, beta_max];
     r2_valid = r2_map(~isnan(r2_map));
     if isempty(r2_valid)
         r2_limits = [0 1];
@@ -455,15 +457,15 @@ function plot_peak_beta_brainmaps_poster(results)
     plot_metric_map(ax1, base_rgb, lag_map, cmap_lag, lag_limits, ...
         sprintf('%s Lag (s)\nPredictive < 0, Reactive > 0', metric_str), mask_shape);
 
-    % Panel 2: |beta| map (always uses actual peak, not CoM)
-    abs_beta_map = abs(beta_map);
+    % Panel 2: Beta magnitude map (always uses actual peak, not CoM)
+    cmap_beta = parula(256);
     if use_tiled
         ax2 = nexttile(layout, 2);
     else
         ax2 = subplot(1, 3, 2);
     end
-    plot_metric_map(ax2, base_rgb, abs_beta_map, parula(256), [0, beta_abs], ...
-        'Peak |Beta| (a.u.)', mask_shape);
+    plot_metric_map(ax2, base_rgb, beta_map, cmap_beta, beta_limits, ...
+        'Peak Beta (z-scored)', mask_shape);
 
     % Panel 3: CV R^2 map
     if use_tiled
@@ -471,7 +473,7 @@ function plot_peak_beta_brainmaps_poster(results)
     else
         ax3 = subplot(1, 3, 3);
     end
-    plot_metric_map(ax3, base_rgb, r2_map, hot(256), r2_limits, ...
+    plot_metric_map(ax3, base_rgb, r2_map, parula(256), r2_limits, ...
         'CV R^2 (%)', mask_shape);
 end
 

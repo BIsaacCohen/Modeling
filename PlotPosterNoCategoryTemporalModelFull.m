@@ -15,7 +15,7 @@ function PlotPosterNoCategoryTemporalModelFull(results, opts)
 %       1. Overall group mean temporal kernel (all ROIs combined)
 %       2. Sorted temporal kernel heatmap (no category dividing line)
 %       3. Model predictions for 2 selected ROIs + behavior trace
-%       4. Brain maps (1x3 horizontal): Peak Lag | |Beta| | CV R²
+%       4. Brain maps (1x3 horizontal): Peak Lag | Beta | CV R²
 %
 %   Optimized for poster presentation with larger fonts and cleaner layouts.
 
@@ -87,7 +87,7 @@ function plot_all_temporal_kernels(results)
     ylabel('Beta coefficient (z-scored)', 'FontSize', 13);
     title(fig_title, 'FontSize', 16, 'Interpreter', 'none');
     legend('Location', 'best', 'FontSize', 11);
-    grid on;
+    grid off;
 end
 
 function plot_temporal_kernel_heatmap(results)
@@ -204,17 +204,18 @@ function plot_multi_roi_predictions_poster(results, target_roi_names)
         ax_handles(i) = ax;
 
         % Actual vs predicted
-        plot(ax, t_truncated, pred.Y_actual(:, roi_idx), 'Color', [0.2 0.2 0.8], ...
-            'LineWidth', 1.5, 'DisplayName', sprintf('%s (actual)', roi_name));
+        plot(ax, t_truncated, pred.Y_actual(:, roi_idx), 'Color', [21/255, 101/255, 192/255], ...
+            'LineWidth', 2.0, 'DisplayName', sprintf('%s (actual)', roi_name));
         hold(ax, 'on');
-        plot(ax, t_truncated, pred.Y_pred(:, roi_idx), 'Color', [0.85 0.33 0.1], ...
-            'LineWidth', 1.5, 'DisplayName', 'Prediction');
+        plot(ax, t_truncated, pred.Y_pred(:, roi_idx), 'Color', [216/255, 27/255, 96/255], ...
+            'LineWidth', 2.0, 'DisplayName', 'Prediction');
         hold(ax, 'off');
 
         title(ax, roi_name, 'Interpreter', 'none', 'FontSize', 16, 'FontWeight', 'bold');
         ylabel(ax, sprintf('%s (z)', roi_name), 'Interpreter', 'none', 'FontSize', 13);
         legend(ax, 'Location', 'best', 'FontSize', 11);
-        grid(ax, 'on');
+        grid(ax, 'off');
+        set(ax, 'Box', 'off');
 
         % Add R^2 annotation with enhanced visibility
         text(ax, 0.02, 0.98, ...
@@ -234,14 +235,15 @@ function plot_multi_roi_predictions_poster(results, target_roi_names)
     end
     ax_handles(3) = ax_behav;
 
-    t_full = (0:(length(pred.behavior_trace_z)-1)) / meta.sampling_rate;
-    plot(ax_behav, t_full, pred.behavior_trace_z, 'Color', [0.13 0.55 0.13], ...
-        'LineWidth', 1.5);
+    t_behavior = (n_lost_start:(n_lost_start + n_valid - 1)) / meta.sampling_rate;
+    plot(ax_behav, t_behavior, pred.behavior_trace_z, 'Color', [56/255 142/255 60/255], ...
+        'LineWidth', 2.0);
     ylabel(ax_behav, sprintf('%s (z)', meta.behavior_predictor), ...
         'Interpreter', 'none', 'FontSize', 13);
     xlabel(ax_behav, 'Time (s)', 'FontSize', 13);
     title(ax_behav, 'Behavioral Predictor', 'FontSize', 16, 'FontWeight', 'bold');
-    grid(ax_behav, 'on');
+    grid(ax_behav, 'off');
+    set(ax_behav, 'Box', 'off');
 
     linkaxes(ax_handles, 'x');
 end
@@ -391,10 +393,12 @@ function plot_peak_beta_brainmaps_poster(results)
     end
     lag_limits = [-lag_span, lag_span];
 
-    beta_abs = max(abs(peak_betas(~isnan(peak_betas))));
-    if isempty(beta_abs) || beta_abs == 0
-        beta_abs = 1;
+    beta_vals = beta_map(~isnan(beta_map));
+    beta_max = max(beta_vals);
+    if isempty(beta_vals) || beta_max == 0
+        beta_max = 1;
     end
+    beta_limits = [0, beta_max];
     r2_valid = r2_map(~isnan(r2_map));
     if isempty(r2_valid)
         r2_limits = [0 1];
@@ -430,15 +434,15 @@ function plot_peak_beta_brainmaps_poster(results)
     plot_metric_map(ax1, base_rgb, lag_map, cmap_lag, lag_limits, ...
         sprintf('%s Lag (s)', metric_str), mask_shape);
 
-    % Panel 2: |beta| map (always uses actual peak, not CoM)
-    abs_beta_map = abs(beta_map);
+    % Panel 2: Beta magnitude map (z-scored peak/CoM value)
+    cmap_beta = parula(256);
     if use_tiled
         ax2 = nexttile(layout, 2);
     else
         ax2 = subplot(1, 3, 2);
     end
-    plot_metric_map(ax2, base_rgb, abs_beta_map, parula(256), [0, beta_abs], ...
-        'Peak |Beta| (a.u.)', mask_shape);
+    plot_metric_map(ax2, base_rgb, beta_map, cmap_beta, beta_limits, ...
+        'Peak Beta (z-scored)', mask_shape);
 
     % Panel 3: CV R^2 map
     if use_tiled
@@ -446,7 +450,7 @@ function plot_peak_beta_brainmaps_poster(results)
     else
         ax3 = subplot(1, 3, 3);
     end
-    plot_metric_map(ax3, base_rgb, r2_map, hot(256), r2_limits, ...
+    plot_metric_map(ax3, base_rgb, r2_map, parula(256), r2_limits, ...
         'CV R^2 (%)', mask_shape);
 end
 
@@ -476,7 +480,7 @@ function plot_group_curve(lag_times, mean_curve, sem_curve, color_val, label_str
     lower = mean_curve - sem_curve;
     fill([lag_times; flipud(lag_times)], [upper; flipud(lower)], color_val, ...
         'FaceAlpha', 0.15, 'EdgeColor', 'none', 'HandleVisibility', 'off');
-    plot(lag_times, mean_curve, 'Color', color_val, 'LineWidth', 2, ...
+    plot(lag_times, mean_curve, 'Color', color_val, 'LineWidth', 3, ...
         'DisplayName', label_str);
 end
 

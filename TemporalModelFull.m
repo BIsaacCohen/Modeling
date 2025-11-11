@@ -36,7 +36,7 @@ function results = TemporalModelFull(ROI, opts)
 %       no_category_plots    - Skip predictive/reactive categorization in plots (default false)
 %       prediction_rois      - {1x2} ROI names for poster predictions (default: {'M1_L','V1_L'})
 %       peak_metric          - Metric for classification: 'peak' or 'com' (default 'peak')
-%       analysis_window_sec  - Time window for peak/CoM search in seconds (default 1.0)
+%       analysis_window_sec  - Time window for peak/CoM search (scalar half-width or [min max], seconds; default 1.0)
 %
 %   OUTPUTS (results struct):
 %       temporal_kernels    - [n_ROIs × 1] struct array with fields:
@@ -202,7 +202,7 @@ fprintf('  Lag range: %.3f s to +%.3f s @ %.1f Hz\n', ...
 
 n_lags_total = max_lag - min_lag + 1;
 n_frames_lost_start = max_lag;
-n_frames_lost_end = abs(min_lag);
+n_frames_lost_end = max(0, -min_lag);
 n_valid = min_length - n_frames_lost_start - n_frames_lost_end;
 
 if n_valid <= 0
@@ -217,13 +217,15 @@ lag_idx = 0;
 for lag = min_lag:max_lag
     lag_idx = lag_idx + 1;
     start_idx = max_lag + 1 - lag;
-    end_idx = min_length - abs(min_lag) - lag;
+    end_idx = min_length - n_frames_lost_end - lag;
     X(:, lag_idx) = behavior_trace_z(start_idx:end_idx);
 end
 
-% Truncate Y to match (middle section of data)
-% Y is now [n_valid × n_rois] - ALL ROIs together
-Y_all = neural_traces_z(max_lag+1 : min_length-abs(min_lag), :);
+% Truncate Y and the zero-lag behavior segment to the overlapping window
+window_start = n_frames_lost_start + 1;
+window_end = min_length - n_frames_lost_end;
+Y_all = neural_traces_z(window_start:window_end, :);
+behavior_trace_center = behavior_trace_z(window_start:window_end);
 
 fprintf('  Design matrix X: [%d × %d] (timepoints × lags)\n', size(X, 1), size(X, 2));
 fprintf('  Outcome matrix Y: [%d × %d] (timepoints × ROIs)\n', size(Y_all, 1), size(Y_all, 2));
@@ -275,6 +277,10 @@ for fold = 1:cv_folds
     X_test = X(test_idx, :);
     Y_test_all = Y_all(test_idx, :);    % All ROIs
 
+    % Store training means to properly reconstruct predictions after ridgeMML centering
+    X_train_mean = mean(X_train, 1);
+    Y_train_mean = mean(Y_train_all, 1);
+
     % Fit ridge regression on training data for ALL ROIs simultaneously
     % ridgeMML returns [n_predictors × n_outcomes] betas and [1 × n_outcomes] lambdas
     [lambda_fold, beta_fold, conv_fail] = ridgeMML(Y_train_all, X_train, 1);
@@ -285,7 +291,8 @@ for fold = 1:cv_folds
     convergence_cv(:, fold) = conv_fail';       % [n_rois × 1]
 
     % Predict on test data for all ROIs
-    Y_pred_test_all = X_test * beta_fold;       % [n_test × n_rois]
+    X_test_centered = bsxfun(@minus, X_test, X_train_mean);
+    Y_pred_test_all = bsxfun(@plus, X_test_centered * beta_fold, Y_train_mean);  % [n_test × n_rois]
 
     % Compute test R² for each ROI independently
     for roi = 1:n_rois
@@ -334,7 +341,10 @@ end
 fprintf('  Lambda range: [%.4f, %.4f]\n', min(lambda_full), max(lambda_full));
 
 % Generate predictions using full-data model
-Y_pred_full = X * beta_full;  % [n_valid × n_rois]
+X_mean_full = mean(X, 1);
+Y_mean_full = mean(Y_all, 1);
+X_centered_full = bsxfun(@minus, X, X_mean_full);
+Y_pred_full = bsxfun(@plus, X_centered_full * beta_full, Y_mean_full);  % [n_valid × n_rois]
 
 % Compute full-data R² for each ROI
 R2_full = zeros(n_rois, 1);
@@ -356,7 +366,7 @@ fprintf('\nComputing temporal kernel statistics for each ROI...\n');
 beta_cv_mean_all = mean(beta_cv_folds, 3);  % [n_lags × n_rois]
 beta_cv_sem_all = std(beta_cv_folds, 0, 3) / sqrt(cv_folds);  % [n_lags × n_rois]
 
-% Calculate both peak and center of mass metrics for each ROI within -1 to +1s window
+% Calculate both peak and center of mass metrics for each ROI within the analysis window
 % Storage for both metrics
 peak_method_lags_frames = zeros(n_rois, 1);
 peak_method_lags_sec = zeros(n_rois, 1);
@@ -367,12 +377,17 @@ com_method_lags_sec = zeros(n_rois, 1);
 com_method_lags_frames = zeros(n_rois, 1);
 
 % Define analysis window (configurable via opts.analysis_window_sec)
-analysis_window_sec = opts.analysis_window_sec;
-window_mask = abs(lag_times_sec) <= analysis_window_sec;
+[analysis_window_min_sec, analysis_window_max_sec] = parse_analysis_window(opts.analysis_window_sec);
+window_mask = (lag_times_sec >= analysis_window_min_sec) & (lag_times_sec <= analysis_window_max_sec);
+if ~any(window_mask)
+    error('TemporalModelFull:AnalysisWindowEmpty', ...
+        'analysis_window_sec bounds [%.3f %.3f] exclude all lag samples. Adjust the window.', ...
+        analysis_window_min_sec, analysis_window_max_sec);
+end
 
 fprintf('  Response metric: %s\n', opts.peak_metric);
-fprintf('  Analysis window: %.1f to +%.1f seconds (%d/%d lags)\n', ...
-    -analysis_window_sec, analysis_window_sec, sum(window_mask), length(lag_times_sec));
+fprintf('  Analysis window: %.3f to %.3f seconds (%d/%d lags)\n', ...
+    analysis_window_min_sec, analysis_window_max_sec, sum(window_mask), length(lag_times_sec));
 
 for roi = 1:n_rois
     % Restrict to analysis window
@@ -477,7 +492,9 @@ results.comparison.peak_method_betas_all = peak_method_betas';  % [1 × n_rois] 
 results.predictions = struct();
 results.predictions.Y_pred = Y_pred_full;                   % [n_valid × n_rois]
 results.predictions.Y_actual = Y_all;                       % [n_valid × n_rois]
-results.predictions.behavior_trace_z = behavior_trace_z;
+results.predictions.behavior_trace_z = behavior_trace_center;
+results.predictions.design_matrix_mean = X_mean_full;
+results.predictions.response_mean = Y_mean_full;
 
 % --- Metadata ---
 results.metadata = struct();
@@ -495,7 +512,7 @@ results.metadata.n_timepoints_lost_start = n_frames_lost_start;
 results.metadata.n_timepoints_lost_end = n_frames_lost_end;
 results.metadata.cv_folds = cv_folds;
 results.metadata.peak_metric = opts.peak_metric;
-results.metadata.analysis_window_sec = analysis_window_sec;
+results.metadata.analysis_window_sec = [analysis_window_min_sec, analysis_window_max_sec];
 results.metadata.timestamp = datestr(now);
 results.metadata.diagnostics = struct('max_correlation', max_corr, ...
     'mean_correlation', mean_corr, 'condition_number', condition_num);
@@ -612,3 +629,34 @@ function ensure_ridgeMML_on_path(script_dir)
     error('ridgeMML.m not found. Please add it to the MATLAB path.');
 end
 
+function [window_min, window_max] = parse_analysis_window(val)
+    if isnumeric(val) && isscalar(val)
+        if val <= 0
+            error('TemporalModelFull:AnalysisWindowScalar', ...
+                'Positive scalar required for analysis_window_sec (got %.3f).', val);
+        end
+        half_width = abs(val);
+        window_min = -half_width;
+        window_max = half_width;
+        return;
+    end
+
+    if isnumeric(val) && numel(val) == 2
+        bounds = double(val(:)');
+        if any(~isfinite(bounds))
+            error('TemporalModelFull:AnalysisWindowFinite', ...
+                'analysis_window_sec bounds must be finite numbers.');
+        end
+        window_min = bounds(1);
+        window_max = bounds(2);
+        if window_min >= window_max
+            error('TemporalModelFull:AnalysisWindowOrder', ...
+                'analysis_window_sec must satisfy min < max (got [%g %g]).', ...
+                window_min, window_max);
+        end
+        return;
+    end
+
+    error('TemporalModelFull:AnalysisWindowFormat', ...
+        'analysis_window_sec must be a positive scalar or a [min max] vector.');
+end

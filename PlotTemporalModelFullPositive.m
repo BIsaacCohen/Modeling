@@ -284,8 +284,8 @@ function plot_multi_roi_predictions(results)
         ax_behav = subplot(n_plot + 1, 1, n_plot + 1);
     end
     ax_handles(end) = ax_behav;
-    t_full = (0:(length(pred.behavior_trace_z)-1)) / meta.sampling_rate;
-    plot(ax_behav, t_full, pred.behavior_trace_z, 'Color', [0.13 0.55 0.13]);
+    t_behavior = (n_lost_start:(n_lost_start + n_valid - 1)) / meta.sampling_rate;
+    plot(ax_behav, t_behavior, pred.behavior_trace_z, 'Color', [0.13 0.55 0.13]);
     ylabel(ax_behav, sprintf('%s (z)', meta.behavior_predictor), 'Interpreter', 'none');
     xlabel(ax_behav, 'Time (s)');
     grid(ax_behav, 'on');
@@ -442,10 +442,12 @@ function plot_peak_beta_brainmaps(results)
     end
     lag_limits = [-lag_span, lag_span];
 
-    beta_abs = max(abs(peak_betas(~isnan(peak_betas))));
-    if isempty(beta_abs) || beta_abs == 0
-        beta_abs = 1;
+    beta_vals = beta_map(~isnan(beta_map));
+    beta_max = max(beta_vals);
+    if isempty(beta_vals) || beta_max == 0
+        beta_max = 1;
     end
+    beta_limits = [0, beta_max];
     r2_valid = r2_map(~isnan(r2_map));
     if isempty(r2_valid)
         r2_limits = [0 1];
@@ -474,15 +476,15 @@ function plot_peak_beta_brainmaps(results)
     plot_metric_map(ax1, base_rgb, lag_map, cmap_lag, lag_limits, ...
         sprintf('Peak Lag (s)\nPredictive < 0, Reactive > 0'), mask_shape);
 
-    % |beta| map
-    abs_beta_map = abs(beta_map);
+    % Beta magnitude map
+    cmap_beta = parula(256);
     if use_tiled
         ax2 = nexttile(layout, 2);
     else
         ax2 = subplot(2, 2, 2);
     end
-    plot_metric_map(ax2, base_rgb, abs_beta_map, parula(256), [0, beta_abs], ...
-        'Peak |Beta| (a.u.)', mask_shape);
+    plot_metric_map(ax2, base_rgb, beta_map, cmap_beta, beta_limits, ...
+        'Peak Beta (z-scored)', mask_shape);
 
     % Categorical map
     if use_tiled
@@ -503,7 +505,7 @@ function plot_peak_beta_brainmaps(results)
     else
         ax4 = subplot(2, 2, 4);
     end
-    plot_metric_map(ax4, base_rgb, r2_map, hot(256), r2_limits, ...
+    plot_metric_map(ax4, base_rgb, r2_map, parula(256), r2_limits, ...
         'CV R^2 (%)', mask_shape);
 end
 
