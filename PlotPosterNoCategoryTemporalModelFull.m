@@ -8,8 +8,14 @@ function PlotPosterNoCategoryTemporalModelFull(results, opts)
 %       results - Output struct returned by TemporalModelFull containing
 %                 temporal kernels, performance metrics, predictions, and metadata.
 %       opts    - Optional struct with fields:
-%           .prediction_rois - {1x2} cell array of ROI names for prediction plots
-%                              (default: {'M1_L', 'V1_L'})
+%           .prediction_rois         - {1x2} ROI names for prediction plots
+%                                      (default: {'M1_L', 'V1_L'})
+%           .kernel_overlay_rois     - up to 2 ROI names to overlay on the
+%                                      group-mean kernel plot (default: {})
+%           .kernel_mean_saturation  - scalar in [0,1], desaturates/brightens
+%                                      the group-mean line color (default: 0.45)
+%           .kernel_overlay_saturation - scalar in [0,1] applied to overlay ROI
+%                                      colors (default: 0.65)
 %
 %   This function generates 4 poster-quality figures WITHOUT predictive/reactive categorization:
 %       1. Overall group mean temporal kernel (all ROIs combined)
@@ -32,9 +38,31 @@ end
 if ~isfield(opts, 'prediction_rois') || isempty(opts.prediction_rois)
     opts.prediction_rois = {'M1_L', 'V1_L'};
 end
+if ~isfield(opts, 'kernel_overlay_rois') || isempty(opts.kernel_overlay_rois)
+    opts.kernel_overlay_rois = {};
+elseif ischar(opts.kernel_overlay_rois)
+    opts.kernel_overlay_rois = {opts.kernel_overlay_rois};
+end
+if ~isfield(opts, 'kernel_mean_saturation') || isempty(opts.kernel_mean_saturation)
+    opts.kernel_mean_saturation = 0.45;
+end
+if ~isfield(opts, 'kernel_overlay_saturation') || isempty(opts.kernel_overlay_saturation)
+    opts.kernel_overlay_saturation = 0.65;
+end
+opts.kernel_mean_saturation = clamp_unit_value(opts.kernel_mean_saturation);
+opts.kernel_overlay_saturation = clamp_unit_value(opts.kernel_overlay_saturation);
+
+if numel(opts.kernel_overlay_rois) > 2
+    error('PlotPosterNoCategoryTemporalModelFull:TooManyKernelOverlays', ...
+        'kernel_overlay_rois supports at most 2 entries (got %d).', ...
+        numel(opts.kernel_overlay_rois));
+end
+
+opts.kernel_overlay_rois = opts.kernel_overlay_rois(:).';
 
 fprintf('\nGenerating poster-quality plots (no categorization)...\n');
-plot_all_temporal_kernels(results);
+plot_all_temporal_kernels(results, opts.kernel_overlay_rois, ...
+    opts.kernel_mean_saturation, opts.kernel_overlay_saturation);
 plot_temporal_kernel_heatmap(results);
 plot_multi_roi_predictions_poster(results, opts.prediction_rois);
 plot_peak_beta_brainmaps_poster(results);
@@ -44,17 +72,33 @@ end
 
 %% ================= Plotting Functions =================
 
-function plot_all_temporal_kernels(results)
+function plot_all_temporal_kernels(results, overlay_roi_names, mean_sat, overlay_sat)
     % Plot overall group mean kernel with SEM shading (all ROIs combined)
+
+    if nargin < 2 || isempty(overlay_roi_names)
+        overlay_roi_names = {};
+    elseif ischar(overlay_roi_names)
+        overlay_roi_names = {overlay_roi_names};
+    end
+    if nargin < 3 || isempty(mean_sat)
+        mean_sat = 1;
+    end
+    if nargin < 4 || isempty(overlay_sat)
+        overlay_sat = 1;
+    end
+    mean_sat = clamp_unit_value(mean_sat);
+    overlay_sat = clamp_unit_value(overlay_sat);
 
     tk = results.temporal_kernels;
     n_rois = numel(tk);
     lag_times = tk(1).lag_times_sec;
     n_lags = numel(lag_times);
+    roi_names = cell(n_rois, 1);
 
     beta_matrix = zeros(n_lags, n_rois);
     for roi = 1:n_rois
         beta_matrix(:, roi) = tk(roi).beta_cv_mean;
+        roi_names{roi} = tk(roi).roi_name;
     end
 
     % Compute overall group mean (all ROIs together)
@@ -72,12 +116,37 @@ function plot_all_temporal_kernels(results)
     figure('Name', fig_title, 'Position', [100 500 900 600]);
     hold on;
 
-    % Plot single overall curve with neutral color
-    neutral_color = [0.3 0.3 0.7];
+    % Optionally overlay up to two specific ROI kernels
+    overlay_roi_names = overlay_roi_names(~cellfun('isempty', overlay_roi_names));
+    if numel(overlay_roi_names) > 2
+        error('PlotPosterNoCategoryTemporalModelFull:TooManyKernelOverlays', ...
+            'kernel_overlay_rois supports at most 2 entries.');
+    end
+    if ~isempty(overlay_roi_names)
+        overlay_colors = [
+            0.85 0.10 0.15;  % red tone
+            0.00 0.35 0.80]; % blue tone
+        for idx = 1:numel(overlay_roi_names)
+            roi_idx = find(strcmpi(roi_names, overlay_roi_names{idx}), 1);
+            if isempty(roi_idx)
+                error('PlotPosterNoCategoryTemporalModelFull:OverlayROINotFound', ...
+                    'Overlay ROI "%s" not found. Available ROIs: %s', ...
+                    overlay_roi_names{idx}, strjoin(roi_names, ', '));
+            end
+            this_curve = tk(roi_idx).beta_cv_mean;
+            adj_color = apply_saturation(overlay_colors(idx, :), overlay_sat);
+            plot(lag_times, this_curve, 'Color', adj_color, ...
+                'LineWidth', 2.5, 'DisplayName', sprintf('%s kernel', roi_names{roi_idx}));
+        end
+    end
+
+    % Plot single overall curve with neutral color last so it stays on top
+    neutral_color = apply_saturation([0 0 0], mean_sat);
     plot_group_curve(lag_times, overall_mean, overall_sem, neutral_color, ...
         sprintf('All ROIs (n=%d)', n_rois));
 
-    plot(xlim, [0 0], 'k--', 'LineWidth', 1, 'HandleVisibility', 'off');
+    yline(0, 'Color', [0 0 0], 'LineWidth', 1.5, ...
+        'LineStyle', '--', 'HandleVisibility', 'off');
     yl = ylim;
     plot([0 0], yl, 'k:', 'LineWidth', 1.5, 'HandleVisibility', 'off');
 
@@ -582,4 +651,19 @@ function cmap = redbluecmap(m)
     b = [linspace(0, 1, m/2)'; ones(m/2, 1)];
 
     cmap = [r, g, b];
+end
+
+function clr = apply_saturation(color_vec, saturation)
+    saturation = clamp_unit_value(saturation);
+    base_color = reshape(color_vec, 1, 3);
+    clr = saturation .* base_color + (1 - saturation) .* ones(1, 3);
+    clr = min(max(clr, 0), 1);
+end
+
+function val = clamp_unit_value(val)
+    if ~isnumeric(val) || ~isscalar(val) || ~isfinite(val)
+        error('PlotPosterNoCategoryTemporalModelFull:InvalidSaturation', ...
+            'Saturation values must be finite scalars in [0, 1].');
+    end
+    val = max(0, min(1, val));
 end
