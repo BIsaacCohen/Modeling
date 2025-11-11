@@ -109,7 +109,7 @@ function plot_temporal_kernel_heatmap(results)
     figure('Name', fig_title, 'Position', [150 450 900 600]);
 
     imagesc(lag_times, 1:length(roi_names), beta_matrix);
-    colormap(redbluecmap);
+    colormap(flipud(redbluecmap));
     colorbar;
 
     % Center colormap on zero
