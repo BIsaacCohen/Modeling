@@ -20,3 +20,6 @@ slprj/
 *.mexglx
 *.mexa64
 
+# MATLAB data files
+*.mat
+
