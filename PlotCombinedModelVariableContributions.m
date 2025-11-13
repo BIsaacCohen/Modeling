@@ -44,7 +44,7 @@ end
 
 group_labels = results.metadata.group_labels(:);
 n_groups = numel(group_labels);
-roi_names = infer_roi_names(results);
+[roi_names, roi_payloads] = resolve_roi_structs(results);
 
 color_map = builtin_color_map();
 group_colors = zeros(n_groups, 3);
@@ -65,11 +65,7 @@ end
 
 for r = 1:numel(roi_names)
     roi_name = roi_names{r};
-    if ~isfield(results, roi_name)
-        warning('ROI %s missing from results struct. Skipping.', roi_name);
-        continue;
-    end
-    roi_data = results.(roi_name);
+    roi_data = roi_payloads{r};
 
     required_fields = {'group_single_R2', 'group_shuffle_R2', 'R2_cv', 'R2_mean'};
     if any(~isfield(roi_data, required_fields))
@@ -148,6 +144,34 @@ for r = 1:numel(roi_names)
 end
 
 fprintf('All combined-model contribution figures generated.\n');
+end
+
+function [names, payloads] = resolve_roi_structs(results)
+if isfield(results, 'contributions')
+    if isfield(results, 'metadata') && isfield(results.metadata, 'target_neural_roi') ...
+            && ~isempty(results.metadata.target_neural_roi)
+        names = {results.metadata.target_neural_roi};
+    else
+        names = {'ROI'};
+    end
+    payloads = {
+        struct( ...
+            'group_single_R2', results.contributions.group_single_R2, ...
+            'group_shuffle_R2', results.contributions.group_shuffle_R2, ...
+            'R2_cv', results.contributions.R2_cv_percent(:)', ...
+            'R2_mean', results.contributions.R2_mean_percent)
+    };
+else
+    names = infer_roi_names(results);
+    payloads = cell(numel(names), 1);
+    for i = 1:numel(names)
+        if isfield(results, names{i})
+            payloads{i} = results.(names{i});
+        else
+            payloads{i} = struct();
+        end
+    end
+end
 end
 
 function names = infer_roi_names(results)

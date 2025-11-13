@@ -29,6 +29,7 @@ function results = TemporalModelEvents(ROI, session_file, opts)
 %       output_file       - MAT file for saving results (default auto)
 %       save_results      - Save results to disk (default true)
 %       show_plots        - Generate diagnostic plots (default true)
+%       remove_initial_seconds - Discard leading seconds before fitting (default 0)
 
 if nargin < 2
     error('TemporalModelEvents requires ROI struct input plus a session_file.');
@@ -52,7 +53,8 @@ defaults = struct(...
     'zscore_design', true, ...
     'output_file', '', ...
     'save_results', true, ...
-    'show_plots', true);
+    'show_plots', true, ...
+    'remove_initial_seconds', 0);
 
 opts = populate_defaults(opts, defaults);
 
@@ -114,11 +116,30 @@ fprintf('Behavior predictor: %s (%.1f Hz, %d frames)\n', ...
 min_length = min(length(neural_trace), length(behavior_trace));
 neural_trace = neural_trace(1:min_length);
 behavior_trace = behavior_trace(1:min_length);
+min_length_initial = min_length;
 
-fprintf('\nMatched timepoints: %d frames (~%.1f s)\n', min_length, min_length / sampling_rate);
+fprintf('\nMatched timepoints: %d frames (~%.1f s)\n', min_length_initial, min_length_initial / sampling_rate);
 fprintf('Constructing events-only design matrix from %s...\n', session_file);
 design = build_event_design_matrix(session_file, opts.event_protocol, ...
-    opts.stim_kernel, opts.lick_kernel, sampling_rate, min_length);
+    opts.stim_kernel, opts.lick_kernel, sampling_rate, min_length_initial);
+
+trim_seconds = max(0, opts.remove_initial_seconds);
+trim_frames = round(trim_seconds * sampling_rate);
+if trim_frames > 0
+    if trim_frames >= min_length_initial
+        error('remove_initial_seconds (%g s) exceeds available recording length (%g s).', ...
+            trim_seconds, min_length_initial / sampling_rate);
+    end
+    fprintf('Removing initial habituation segment: %.1f s (%d frames)\n', trim_seconds, trim_frames);
+    neural_trace = neural_trace(trim_frames+1:end);
+    behavior_trace = behavior_trace(trim_frames+1:end);
+    min_length = min_length_initial - trim_frames;
+    design = trim_initial_design_segment(design, trim_frames, trim_seconds, sampling_rate);
+else
+    trim_seconds = 0;
+    trim_frames = 0;
+    min_length = min_length_initial;
+end
 
 X_events_full = design.matrix;
 regressor_names_events = design.regressor_names;
@@ -179,6 +200,15 @@ for g = 1:numel(group_info)
     group_info(g).indices = group_info(g).indices + n_lags_total;
 end
 
+motion_group_label = sprintf('%s motion (lags)', opts.behavior_predictor);
+group_labels = [{motion_group_label}; arrayfun(@(g) g.label, group_info, 'UniformOutput', false)];
+group_indices = cell(numel(group_labels), 1);
+group_indices{1} = 1:n_lags_total;
+for g = 1:numel(group_info)
+    group_indices{g+1} = group_info(g).indices;
+end
+n_groups_total = numel(group_labels);
+
 if opts.zscore_design
     X = zscore(X);
 else
@@ -219,6 +249,8 @@ beta_cv_folds = zeros(n_regressors, cv_folds);
 lambda_cv_folds = zeros(cv_folds, 1);
 R2_cv_folds = zeros(cv_folds, 1);
 convergence_cv = zeros(cv_folds, 1);
+group_single_R2 = nan(n_groups_total, cv_folds);
+group_shuffle_R2 = nan(n_groups_total, cv_folds);
 
 for fold = 1:cv_folds
     test_start = (fold - 1) * fold_size + 1;
@@ -241,6 +273,41 @@ for fold = 1:cv_folds
     TSS_test = sum((Y_test - mean(Y_test)).^2);
     RSS_test = sum((Y_test - Y_pred_test).^2);
     R2_cv_folds(fold) = max(0, 1 - RSS_test / TSS_test);
+
+    TSS_common = TSS_test;
+    if TSS_common < eps
+        TSS_common = eps;
+    end
+
+    for g = 1:n_groups_total
+        idx = group_indices{g};
+        if isempty(idx)
+            continue;
+        end
+
+        X_train_single = X_train(:, idx);
+        X_test_single = X_test(:, idx);
+        if isempty(X_train_single) || all(std(X_train_single, 0, 1) < 1e-8)
+            group_single_R2(g, fold) = 0;
+        else
+            [~, beta_single, ~] = ridgeMML(Y_train, X_train_single, 1);
+            Y_pred_single = X_test_single * beta_single;
+            RSS_single = sum((Y_test - Y_pred_single).^2);
+            group_single_R2(g, fold) = max(0, 1 - RSS_single / TSS_common) * 100;
+        end
+
+        X_train_shuff = X_train;
+        X_test_shuff = X_test;
+        perm_train = randperm(size(X_train, 1));
+        perm_test = randperm(size(X_test, 1));
+        X_train_shuff(:, idx) = X_train(perm_train, idx);
+        X_test_shuff(:, idx) = X_test(perm_test, idx);
+
+        [~, beta_shuff, ~] = ridgeMML(Y_train, X_train_shuff, 1);
+        Y_pred_shuff = X_test_shuff * beta_shuff;
+        RSS_shuff = sum((Y_test - Y_pred_shuff).^2);
+        group_shuffle_R2(g, fold) = max(0, 1 - RSS_shuff / TSS_common) * 100;
+    end
 
     fprintf('  Fold %d/%d: R^2 = %.4f, lambda = %.4f, n_train = %d, n_test = %d\n', ...
         fold, cv_folds, R2_cv_folds(fold), lambda_cv_folds(fold), ...
@@ -309,11 +376,49 @@ end
 fprintf('Summarizing event kernels...\n');
 event_kernels = compute_event_kernels(beta_cv_folds, beta_full, group_info, cv_folds);
 
+%% 11. Contribution statistics (single-variable and shuffle unique)
+baseline_percent = R2_cv_folds(:)' * 100;
+group_explained_mean = nan(n_groups_total, 1);
+group_explained_std = nan(n_groups_total, 1);
+group_unique_mean = nan(n_groups_total, 1);
+group_unique_std = nan(n_groups_total, 1);
+
+for g = 1:n_groups_total
+    single_vals = group_single_R2(g, :);
+    valid_single = ~isnan(single_vals);
+    if any(valid_single)
+        vals = single_vals(valid_single);
+        group_explained_mean(g) = mean(vals);
+        group_explained_std(g) = std(vals);
+    end
+
+    shuffle_vals = group_shuffle_R2(g, :);
+    valid_shuffle = ~isnan(shuffle_vals);
+    if any(valid_shuffle)
+        vals = shuffle_vals(valid_shuffle);
+        diff_vals = baseline_percent(valid_shuffle) - vals;
+        diff_vals = max(diff_vals, 0);
+        group_unique_mean(g) = mean(diff_vals);
+        group_unique_std(g) = std(diff_vals);
+    end
+end
+
 %% 8. Assemble results structure
 results = struct();
 
 results.temporal_kernel = temporal_kernel;
 results.event_kernels = event_kernels;
+results.contributions = struct();
+results.contributions.group_labels = group_labels;
+results.contributions.group_indices = group_indices;
+results.contributions.group_single_R2 = group_single_R2;
+results.contributions.group_shuffle_R2 = group_shuffle_R2;
+results.contributions.group_explained_mean = group_explained_mean;
+results.contributions.group_explained_std = group_explained_std;
+results.contributions.group_unique_mean = group_unique_mean;
+results.contributions.group_unique_std = group_unique_std;
+results.contributions.R2_cv_percent = baseline_percent;
+results.contributions.R2_mean_percent = R2_cv_mean * 100;
 
 results.performance = struct();
 results.performance.R2_cv_mean = R2_cv_mean;
@@ -349,6 +454,8 @@ results.design_matrix.event = struct( ...
 results.design_matrix.group_info = group_info;
 results.design_matrix.event_counts = design.event_counts;
 results.design_matrix.n_zero_variance = design.n_zero_variance;
+results.design_matrix.group_indices = group_indices;
+results.design_matrix.group_labels = group_labels;
 
 results.metadata = struct();
 results.metadata.target_neural_roi = opts.target_neural_roi;
@@ -364,15 +471,21 @@ results.metadata.max_lag_seconds = lag_times_sec(end);
 results.metadata.sampling_rate = sampling_rate;
 results.metadata.cv_folds = cv_folds;
 results.metadata.n_timepoints_total = min_length;
+results.metadata.n_timepoints_original = min_length_initial;
 results.metadata.n_timepoints_used = n_valid;
 results.metadata.n_timepoints_lost_start = n_frames_lost_start;
 results.metadata.n_timepoints_lost_end = n_frames_lost_end;
+results.metadata.n_timepoints_removed_initial = trim_frames;
+results.metadata.initial_trim_seconds = trim_seconds;
+results.metadata.initial_trim_applied = trim_frames > 0;
 results.metadata.n_motion_regressors = n_lags_total;
 results.metadata.n_event_regressors = n_event_regressors;
 results.metadata.n_regressors = n_regressors;
 results.metadata.timestamp = datestr(now);
 results.metadata.zscore_design = opts.zscore_design;
 results.metadata.condition_number = condition_num;
+results.metadata.group_labels = group_labels;
+results.metadata.n_groups = n_groups_total;
 
 if isfield(ROI, 'metadata') && isfield(ROI.metadata, 'source')
     results.metadata.source_roi_file = ROI.metadata.source;
@@ -1041,5 +1154,95 @@ function regressors = apply_temporal_kernel(stimulus_vector, kernel_window, samp
             shifted_vector = [stimulus_vector(shift_frames+1:end); zeros(shift_frames, 1)];
         end
         regressors(:, i) = shifted_vector;
+    end
+end
+
+function design = trim_initial_design_segment(design, trim_frames, trim_seconds, sampling_rate)
+    if trim_frames <= 0 || isempty(design)
+        return;
+    end
+
+    if size(design.matrix, 1) <= trim_frames
+        error('Initial trim removes all event regressors.');
+    end
+
+    design.matrix = design.matrix(trim_frames+1:end, :);
+    total_time_s = size(design.matrix, 1) / sampling_rate;
+
+    if isfield(design, 'events') && ~isempty(design.events)
+        design.events = shift_and_trim_events(design.events, trim_seconds, total_time_s);
+    end
+    design.event_counts = summarize_event_counts(design.events);
+end
+
+function events = shift_and_trim_events(events, trim_seconds, total_time_s)
+    if isempty(events)
+        return;
+    end
+
+    if isfield(events, 'noise_onsets')
+        times = events.noise_onsets(:) - trim_seconds;
+        keep = times >= 0 & times <= total_time_s;
+        events.noise_onsets = times(keep);
+        if isfield(events, 'noise_intensities')
+            intens = events.noise_intensities(:);
+            events.noise_intensities = intens(keep);
+        end
+    end
+
+    lick_fields = {'lick_post_stimulus', 'lick_post_water_cued', ...
+        'lick_post_water_uncued', 'lick_post_water_omission'};
+    for i = 1:numel(lick_fields)
+        field = lick_fields{i};
+        if isfield(events, field)
+            times = events.(field)(:);
+            times = times - trim_seconds;
+            keep = times >= 0 & times <= total_time_s;
+            events.(field) = times(keep);
+        end
+    end
+
+    if isfield(events, 'lick_post_water_all')
+        events.lick_post_water_all = sort([ ...
+            getfield_or_empty(events, 'lick_post_water_cued'); ...
+            getfield_or_empty(events, 'lick_post_water_uncued'); ...
+            getfield_or_empty(events, 'lick_post_water_omission')]);
+        events.lick_post_water_all = events.lick_post_water_all(:);
+    end
+end
+
+function vals = getfield_or_empty(struct_in, field)
+    if isfield(struct_in, field)
+        vals = struct_in.(field)(:);
+    else
+        vals = [];
+    end
+end
+
+function counts = summarize_event_counts(events)
+    counts = struct('noise_primary', 0, ...
+        'lick_post_stimulus', 0, ...
+        'lick_post_water_cued', 0, ...
+        'lick_post_water_uncued', 0, ...
+        'lick_post_water_omission', 0);
+
+    if isempty(events)
+        return;
+    end
+
+    if isfield(events, 'noise_onsets')
+        counts.noise_primary = numel(events.noise_onsets);
+    end
+    if isfield(events, 'lick_post_stimulus')
+        counts.lick_post_stimulus = numel(events.lick_post_stimulus);
+    end
+    if isfield(events, 'lick_post_water_cued')
+        counts.lick_post_water_cued = numel(events.lick_post_water_cued);
+    end
+    if isfield(events, 'lick_post_water_uncued')
+        counts.lick_post_water_uncued = numel(events.lick_post_water_uncued);
+    end
+    if isfield(events, 'lick_post_water_omission')
+        counts.lick_post_water_omission = numel(events.lick_post_water_omission);
     end
 end

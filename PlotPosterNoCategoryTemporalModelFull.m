@@ -66,6 +66,8 @@ plot_all_temporal_kernels(results, opts.kernel_overlay_rois, ...
 plot_temporal_kernel_heatmap(results);
 plot_multi_roi_predictions_poster(results, opts.prediction_rois);
 plot_peak_beta_brainmaps_poster(results);
+plot_variable_cvr2_brainmaps(results);
+plot_variable_beta_peak_brainmaps(results);
 fprintf('Poster plots generated.\n');
 
 end
@@ -243,10 +245,16 @@ function plot_multi_roi_predictions_poster(results, target_roi_names)
     meta = results.metadata;
     pred = results.predictions;
 
-    % Time vector for truncated data
-    n_valid = meta.n_timepoints_used;
-    n_lost_start = meta.n_timepoints_lost_start;
-    t_truncated = (n_lost_start:(n_lost_start + n_valid - 1)) / meta.sampling_rate;
+    % Time vector for truncated data (fallback for multi-ROI events results)
+    if isfield(pred, 'time_vector') && ~isempty(pred.time_vector)
+        t_truncated = pred.time_vector(:)';
+        n_valid = numel(t_truncated);
+        n_lost_start = 0;
+    else
+        n_valid = size(pred.Y_actual, 1);
+        n_lost_start = derive_lost_start(meta);
+        t_truncated = (n_lost_start:(n_lost_start + n_valid - 1)) / meta.sampling_rate;
+    end
 
     fig_title = sprintf('Model Predictions: %s & %s vs %s', ...
         target_roi_names{1}, target_roi_names{2}, meta.behavior_predictor);
@@ -304,9 +312,28 @@ function plot_multi_roi_predictions_poster(results, target_roi_names)
     end
     ax_handles(3) = ax_behav;
 
-    t_behavior = (n_lost_start:(n_lost_start + n_valid - 1)) / meta.sampling_rate;
-    plot(ax_behav, t_behavior, pred.behavior_trace_z, 'Color', [56/255 142/255 60/255], ...
-        'LineWidth', 2.0);
+    if isfield(pred, 'time_vector') && ~isempty(pred.time_vector)
+        t_behavior = pred.time_vector(:)';
+    else
+        t_behavior = (n_lost_start:(n_lost_start + n_valid - 1)) / meta.sampling_rate;
+    end
+
+    if isfield(pred, 'truncated_behavior') && ~isempty(pred.truncated_behavior)
+        behavior_trace = pred.truncated_behavior(:)';
+        t_behavior = t_behavior(1:numel(behavior_trace));
+    else
+        behavior_trace = pred.behavior_trace_z(:)';
+        min_len = min(numel(behavior_trace), numel(t_behavior));
+        behavior_trace = behavior_trace(1:min_len);
+        t_behavior = t_behavior(1:min_len);
+    end
+
+    plot(ax_behav, t_behavior, behavior_trace, 'Color', [56/255 142/255 60/255], ...
+        'LineWidth', 2.0, 'DisplayName', sprintf('%s (z)', meta.behavior_predictor));
+    hold(ax_behav, 'on');
+    overlay_behavior_event_markers(ax_behav, results, t_behavior);
+    hold(ax_behav, 'off');
+    legend(ax_behav, 'Location', 'best', 'FontSize', 11);
     ylabel(ax_behav, sprintf('%s (z)', meta.behavior_predictor), ...
         'Interpreter', 'none', 'FontSize', 13);
     xlabel(ax_behav, 'Time (s)', 'FontSize', 13);
@@ -317,60 +344,67 @@ function plot_multi_roi_predictions_poster(results, target_roi_names)
     linkaxes(ax_handles, 'x');
 end
 
-function plot_peak_beta_brainmaps_poster(results)
-    % Plot peak lag/beta/R² summaries on cortex map (1x3 layout, no category labels)
-
-    if ~isfield(results, 'comparison') || ~isfield(results.comparison, 'roi_names')
-        warning('PlotPosterNoCategoryTemporalModelFull:NoComparison', ...
-            'Comparison summaries missing; skipping brain maps.');
-        return;
-    end
-
-    if ~isfield(results, 'metadata') || ...
-            ~isfield(results.metadata, 'source_roi_file') || ...
-            ~isstruct(results.metadata.source_roi_file)
-        warning('PlotPosterNoCategoryTemporalModelFull:NoSpatialSource', ...
-            'No ROI source metadata available; skipping brain maps.');
-        return;
-    end
-
-    source = results.metadata.source_roi_file;
-    neural_path = '';
-    if isfield(source, 'neural_roi_file')
-        neural_path = source.neural_roi_file;
-    elseif isfield(source, 'neural_rois')
-        neural_path = source.neural_rois;
-    end
-
-    if isempty(neural_path) || exist(neural_path, 'file') ~= 2
-        warning('PlotPosterNoCategoryTemporalModelFull:MissingROIFile', ...
-            'Neural ROI file not found (%s); skipping brain maps.', neural_path);
-        return;
-    end
-
-    spatial = load(neural_path, '-mat');
-    if ~isfield(spatial, 'ROI_info') || ~isfield(spatial, 'img_info')
-        warning('PlotPosterNoCategoryTemporalModelFull:InvalidROIFile', ...
-            'ROI file %s missing ROI_info/img_info; skipping brain maps.', neural_path);
-        return;
-    end
-
-    img_info = spatial.img_info;
-    roi_info = spatial.ROI_info;
-    if ~isfield(img_info, 'imageData')
-        warning('PlotPosterNoCategoryTemporalModelFull:NoImageData', ...
-            'img_info.imageData missing in %s; skipping brain maps.', neural_path);
-        return;
-    end
-
-    if isfield(roi_info(1), 'Stats') && isfield(roi_info(1).Stats, 'ROI_binary_mask')
-        dims = size(roi_info(1).Stats.ROI_binary_mask);
+function overlay_behavior_event_markers(ax, results, time_vec)
+    if nargin < 3 || isempty(time_vec)
+        time_range = get(ax, 'XLim');
     else
-        dims = size(img_info.imageData);
+        time_range = [min(time_vec), max(time_vec)];
     end
-    roi_names_source = arrayfun(@(r)char(r.Name), roi_info, 'UniformOutput', false);
 
-    target_names = results.comparison.roi_names;
+    event_data = struct();
+    if isfield(results, 'events') && ~isempty(results.events)
+        event_data = results.events;
+    elseif isfield(results, 'design_matrix') && isfield(results.design_matrix, 'events')
+        event_data = results.design_matrix.events;
+    end
+
+    if isempty(event_data) || ~isstruct(event_data) || isempty(fieldnames(event_data))
+        return;
+    end
+
+    event_specs = {
+        'noise_onsets',        [0.35 0.35 0.35], 'Noise stimulus start';
+        'lick_post_stimulus',  [0.80 0.30 0.30], 'First lick post stimulus';
+        'lick_post_water_all', [0.20 0.55 0.75], 'First lick post water'};
+
+    for es = 1:size(event_specs, 1)
+        field_name = event_specs{es, 1};
+        color = event_specs{es, 2};
+        label = event_specs{es, 3};
+
+        if ~isfield(event_data, field_name) || isempty(event_data.(field_name))
+            continue;
+        end
+
+        times = double(event_data.(field_name)(:));
+        times = times(isfinite(times));
+        times = times(times >= time_range(1) & times <= time_range(2));
+        if isempty(times)
+            continue;
+        end
+
+        first_marker = true;
+        for t_evt = times(:)'
+            h = xline(ax, t_evt, '--', 'Color', color, 'LineWidth', 1.2);
+            if first_marker
+                set(h, 'DisplayName', label);
+                first_marker = false;
+            else
+                set(h, 'HandleVisibility', 'off');
+            end
+        end
+    end
+end
+
+function plot_peak_beta_brainmaps_poster(results)
+    % Plot peak lag/beta/R^2 summaries on cortex map (1x3 layout, no category labels)
+
+    ctx = prepare_roi_brain_context(results);
+    if isempty(ctx)
+        return;
+    end
+
+    target_names = ctx.target_names;
     peak_lags = results.comparison.peak_lags_all_sec;
 
     % Use actual peak beta for brain map (not CoM beta if CoM metric enabled)
@@ -387,43 +421,28 @@ function plot_peak_beta_brainmaps_poster(results)
         return;
     end
 
-    lag_map = nan(dims);
-    beta_map = nan(dims);
-    r2_map = nan(dims);
+    lag_map = nan(ctx.dims);
+    beta_map = nan(ctx.dims);
+    r2_map = nan(ctx.dims);
     n_assigned = 0;
-    n_skipped = 0;
 
     for i = 1:numel(target_names)
-        roi_name = target_names{i};
-        match_idx = find(strcmpi(roi_names_source, roi_name), 1);
-        if isempty(match_idx)
-            error('PlotPosterNoCategoryTemporalModelFull:ROIMaskMissing', ...
-                'ROI "%s" not found in %s', roi_name, neural_path);
-        end
-        roi_struct = roi_info(match_idx);
-        if ~isfield(roi_struct, 'Stats') || ...
-                ~isfield(roi_struct.Stats, 'ROI_binary_mask')
-            error('PlotPosterNoCategoryTemporalModelFull:MaskMissing', ...
-                'ROI "%s" missing Stats.ROI_binary_mask in %s', roi_name, neural_path);
-        end
-        mask = roi_struct.Stats.ROI_binary_mask;
-        if ~isequal(size(mask), dims)
-            error('PlotPosterNoCategoryTemporalModelFull:MaskSizeMismatch', ...
-                'ROI "%s" mask size mismatch (expected %dx%d).', roi_name, dims(1), dims(2));
+        mask = ctx.roi_masks{i};
+        if isempty(mask)
+            continue;
         end
 
         lag_val = peak_lags(i);
         beta_val = peak_betas(i);
         r2_val = cv_r2_all(i) * 100;  % express as %
         if isnan(lag_val) || isnan(beta_val) || isnan(r2_val)
-            n_skipped = n_skipped + 1;
             continue;
         end
 
         overlap = ~isnan(lag_map) & mask;
         if any(overlap(:))
             error('PlotPosterNoCategoryTemporalModelFull:OverlappingMasks', ...
-                'ROI "%s" overlaps with another ROI in %s', roi_name, neural_path);
+                'ROI "%s" overlaps with another ROI.', target_names{i});
         end
 
         lag_map(mask) = lag_val;
@@ -432,25 +451,9 @@ function plot_peak_beta_brainmaps_poster(results)
         n_assigned = n_assigned + 1;
     end
 
-    brain_mask = load_optional_mask(source, 'brain_mask_file', dims);
-    if isempty(brain_mask) && isfield(img_info, 'logical_mask')
-        brain_mask = logical(img_info.logical_mask);
-    end
-    if isempty(brain_mask)
-        brain_mask = true(dims);
-    end
-
-    vascular_mask = load_optional_mask(source, 'vascular_mask_file', dims);
-    if isempty(vascular_mask)
-        vascular_mask = false(dims);
-    end
-
-    mask_shape = brain_mask & ~vascular_mask;
-    lag_map(~mask_shape) = nan;
-    beta_map(~mask_shape) = nan;
-    r2_map(~mask_shape) = nan;
-
-    base_rgb = build_mask_background(mask_shape);
+    lag_map(~ctx.mask_shape) = nan;
+    beta_map(~ctx.mask_shape) = nan;
+    r2_map(~ctx.mask_shape) = nan;
 
     lag_span = max(abs(peak_lags(~isnan(peak_lags))));
     if isempty(lag_span) || lag_span == 0
@@ -500,8 +503,8 @@ function plot_peak_beta_brainmaps_poster(results)
     else
         ax1 = subplot(1, 3, 1);
     end
-    plot_metric_map(ax1, base_rgb, lag_map, cmap_lag, lag_limits, ...
-        sprintf('%s Lag (s)', metric_str), mask_shape);
+    plot_metric_map(ax1, ctx.base_rgb, lag_map, cmap_lag, lag_limits, ...
+        sprintf('%s Lag (s)', metric_str), ctx.mask_shape, false, false, ctx.roi_masks);
 
     % Panel 2: Beta magnitude map (z-scored peak/CoM value)
     cmap_beta = parula(256);
@@ -510,8 +513,8 @@ function plot_peak_beta_brainmaps_poster(results)
     else
         ax2 = subplot(1, 3, 2);
     end
-    plot_metric_map(ax2, base_rgb, beta_map, cmap_beta, beta_limits, ...
-        'Peak Beta (z-scored)', mask_shape);
+    plot_metric_map(ax2, ctx.base_rgb, beta_map, cmap_beta, beta_limits, ...
+        'Peak Beta (z-scored)', ctx.mask_shape, false, false, ctx.roi_masks);
 
     % Panel 3: CV R^2 map
     if use_tiled
@@ -519,9 +522,376 @@ function plot_peak_beta_brainmaps_poster(results)
     else
         ax3 = subplot(1, 3, 3);
     end
-    plot_metric_map(ax3, base_rgb, r2_map, parula(256), r2_limits, ...
-        'CV R^2 (%)', mask_shape);
+    plot_metric_map(ax3, ctx.base_rgb, r2_map, parula(256), r2_limits, ...
+        'CV R^2 (%)', ctx.mask_shape, false, false, ctx.roi_masks);
 end
+
+
+function plot_variable_cvr2_brainmaps(results)
+    ctx = prepare_roi_brain_context(results);
+    if isempty(ctx)
+        return;
+    end
+
+    if ~isfield(results, 'contributions')
+        warning('PlotPosterNoCategoryTemporalModelFull:NoContributions', ...
+            'Results struct lacks contributions; skipping per-variable CVR^2 maps.');
+        return;
+    end
+
+    contr = results.contributions;
+    required = {'group_single_R2', 'group_labels'};
+    if any(~isfield(contr, required))
+        warning('PlotPosterNoCategoryTemporalModelFull:IncompleteContributions', ...
+            'Contributions struct missing required fields; skipping per-variable CVR^2 maps.');
+        return;
+    end
+
+    group_labels = contr.group_labels(:);
+    group_r2 = contr.group_single_R2;
+    if ndims(group_r2) ~= 3
+        warning('PlotPosterNoCategoryTemporalModelFull:InvalidContributionDims', ...
+            'group_single_R2 must be G x R x folds; skipping per-variable CVR^2 maps.');
+        return;
+    end
+
+    group_mean = mean(group_r2, 3, 'omitnan');
+    if size(group_mean, 2) ~= numel(ctx.target_names)
+        warning('PlotPosterNoCategoryTemporalModelFull:RoiMismatch', ...
+            'Mismatch between ROI counts in contributions and spatial metadata; skipping per-variable CVR^2 maps.');
+        return;
+    end
+
+    n_groups = size(group_mean, 1);
+    if n_groups == 0
+        return;
+    end
+
+    clim = [min(group_mean(:), [], 'omitnan'), max(group_mean(:), [], 'omitnan')];
+    if any(isnan(clim))
+        clim = [0, 1];
+    elseif clim(1) == clim(2)
+        if clim(2) == 0 || isnan(clim(2))
+            clim = [0, 1];
+        else
+            clim = [0, clim(2)];
+        end
+    end
+
+    fig = figure('Name', 'Variable CVR^2 Brain Maps', 'Position', [100 100 1600 600]);
+    n_cols = min(4, n_groups);
+    n_rows = ceil(n_groups / n_cols);
+    use_tiled = exist('tiledlayout', 'file') == 2;
+    layout = [];
+    if use_tiled
+        layout = tiledlayout(n_rows, n_cols, 'TileSpacing', 'compact', 'Padding', 'compact');
+    end
+
+    for g = 1:n_groups
+        if use_tiled
+            ax = nexttile(layout, g);
+        else
+            ax = subplot(n_rows, n_cols, g);
+        end
+        value_map = nan(ctx.dims);
+        for r = 1:numel(ctx.roi_masks)
+            mask = ctx.roi_masks{r};
+            if isempty(mask)
+                continue;
+            end
+            val = group_mean(g, r);
+            if isnan(val)
+                continue;
+            end
+            value_map(mask) = val;
+        end
+        ttl = sprintf('%s CV R^2 (%%)', group_labels{g});
+        plot_metric_map(ax, ctx.base_rgb, value_map, parula(256), clim, ...
+            ttl, ctx.mask_shape, false, false, ctx.roi_masks);
+    end
+
+    add_super_title(fig, layout, 'Single-variable CVR^2 brain maps');
+end
+
+function plot_variable_beta_peak_brainmaps(results)
+    ctx = prepare_roi_brain_context(results);
+    if isempty(ctx)
+        return;
+    end
+
+    if ~isfield(results, 'event_kernels') || isempty(results.event_kernels)
+        warning('PlotPosterNoCategoryTemporalModelFull:NoEventKernels', ...
+            'Event kernel summaries missing; skipping per-variable beta maps.');
+        return;
+    end
+
+    event_kernels = results.event_kernels;
+    template_idx = find(~cellfun(@isempty, event_kernels), 1, 'first');
+    if isempty(template_idx)
+        warning('PlotPosterNoCategoryTemporalModelFull:EmptyEventKernels', ...
+            'Event kernel entries are empty; skipping per-variable beta maps.');
+        return;
+    end
+
+    template = event_kernels{template_idx};
+    if isempty(template)
+        warning('PlotPosterNoCategoryTemporalModelFull:TemplateKernelMissing', ...
+            'Template event kernel missing; skipping per-variable beta maps.');
+        return;
+    end
+
+    n_rois = numel(ctx.target_names);
+    lag_counts = arrayfun(@(k) numel(k.lag_times_sec), template);
+    valid_groups = find(lag_counts > 0);
+
+    label_list = {};
+    beta_rows = [];
+    peak_times = [];
+
+    for idx = valid_groups(:)'
+        lag_times = template(idx).lag_times_sec(:)';
+        n_lags = numel(lag_times);
+        if n_lags == 0
+            continue;
+        end
+        roi_curves = nan(n_rois, n_lags);
+        for r = 1:n_rois
+            roi_kernel = event_kernels{r};
+            if isempty(roi_kernel) || numel(roi_kernel) < idx
+                continue;
+            end
+            curve = roi_kernel(idx).beta_cv_mean(:)';
+            if isempty(curve)
+                continue;
+            end
+            len = min(numel(curve), n_lags);
+            roi_curves(r, 1:len) = curve(1:len);
+        end
+        [snapshot, peak_time] = extract_peak_snapshot(roi_curves, lag_times);
+        if isempty(snapshot)
+            continue;
+        end
+        label_list{end+1} = assign_default_label(template(idx).label, idx); %#ok<AGROW>
+        peak_times(end+1, 1) = peak_time; %#ok<AGROW>
+        beta_rows = [beta_rows; snapshot']; %#ok<AGROW>
+    end
+
+    % Add motion predictor as its own group, if available
+    if isfield(results, 'temporal_kernels') && ~isempty(results.temporal_kernels)
+        motion_lag = results.temporal_kernels(1).lag_times_sec(:)';
+        if ~isempty(motion_lag)
+            n_motion_lags = numel(motion_lag);
+            roi_curves = nan(n_rois, n_motion_lags);
+            for r = 1:min(numel(results.temporal_kernels), n_rois)
+                tk = results.temporal_kernels(r);
+                if isempty(tk) || isempty(tk.beta_cv_mean)
+                    continue;
+                end
+                curve = tk.beta_cv_mean(:)';
+                len = min(numel(curve), n_motion_lags);
+                roi_curves(r, 1:len) = curve(1:len);
+            end
+            [snapshot, peak_time] = extract_peak_snapshot(roi_curves, motion_lag);
+            if ~isempty(snapshot)
+                if isfield(results, 'metadata') && isfield(results.metadata, 'behavior_predictor') ...
+                        && ~isempty(results.metadata.behavior_predictor)
+                    motion_label = sprintf('%s motion', results.metadata.behavior_predictor);
+                else
+                    motion_label = 'Motion predictor';
+                end
+                label_list{end+1} = motion_label; %#ok<AGROW>
+                peak_times(end+1, 1) = peak_time; %#ok<AGROW>
+                beta_rows = [beta_rows; snapshot']; %#ok<AGROW>
+            end
+        end
+    end
+
+    if isempty(beta_rows)
+        warning('PlotPosterNoCategoryTemporalModelFull:NoLagInfo', ...
+            'No predictor groups had valid lag metadata; skipping beta peak brain maps.');
+        return;
+    end
+
+    n_groups = size(beta_rows, 1);
+    beta_values = beta_rows;
+
+    beta_span = max(abs(beta_values(:)), [], 'omitnan');
+    if isempty(beta_span) || beta_span == 0
+        beta_span = 1;
+    end
+    clim = [-beta_span, beta_span];
+
+    fig = figure('Name', 'Variable Beta Snapshots (Peak Avg Time)', ...
+        'Position', [150 150 1600 600]);
+    n_cols = min(4, n_groups);
+    n_rows = ceil(n_groups / n_cols);
+    use_tiled = exist('tiledlayout', 'file') == 2;
+    layout = [];
+    if use_tiled
+        layout = tiledlayout(n_rows, n_cols, 'TileSpacing', 'compact', 'Padding', 'compact');
+    end
+
+    for gi = 1:n_groups
+        if use_tiled
+            ax = nexttile(layout, gi);
+        else
+            ax = subplot(n_rows, n_cols, gi);
+        end
+        value_map = nan(ctx.dims);
+        for r = 1:numel(ctx.roi_masks)
+            mask = ctx.roi_masks{r};
+            if isempty(mask)
+                continue;
+            end
+            val = beta_values(gi, r);
+            if isnan(val)
+                continue;
+            end
+            value_map(mask) = val;
+        end
+        if isnan(peak_times(gi))
+            time_str = 't = N/A';
+        else
+            time_str = sprintf('t = %.2f s', peak_times(gi));
+        end
+        ttl = sprintf('%s\n(%s)', label_list{gi}, time_str);
+        plot_metric_map(ax, ctx.base_rgb, value_map, redbluecmap(256), clim, ...
+            ttl, ctx.mask_shape, false, false, ctx.roi_masks);
+    end
+
+    add_super_title(fig, layout, 'Variable beta weights at peak average time');
+end
+
+function [snapshot, peak_time] = extract_peak_snapshot(roi_curves, lag_times)
+    snapshot = [];
+    peak_time = NaN;
+    if isempty(roi_curves) || isempty(lag_times)
+        return;
+    end
+    avg_curve = mean(roi_curves, 1, 'omitnan');
+    avg_abs = mean(abs(roi_curves), 1, 'omitnan');
+    if all(isnan(avg_abs))
+        avg_abs = abs(avg_curve);
+    end
+    if all(isnan(avg_abs))
+        return;
+    end
+    [~, peak_idx] = max(avg_abs);
+    snapshot = roi_curves(:, peak_idx);
+    peak_time = lag_times(peak_idx);
+end
+
+function ctx = prepare_roi_brain_context(results)
+    ctx = [];
+
+    if ~isfield(results, 'comparison') || ~isfield(results.comparison, 'roi_names')
+        warning('PlotPosterNoCategoryTemporalModelFull:NoComparison', ...
+            'Comparison summaries missing; skipping brain maps.');
+        return;
+    end
+
+    if ~isfield(results, 'metadata') || ...
+            ~isfield(results.metadata, 'source_roi_file') || ...
+            ~isstruct(results.metadata.source_roi_file)
+        warning('PlotPosterNoCategoryTemporalModelFull:NoSpatialSource', ...
+            'No ROI source metadata available; skipping brain maps.');
+        return;
+    end
+
+    source = results.metadata.source_roi_file;
+    neural_path = '';
+    if isfield(source, 'neural_roi_file')
+        neural_path = source.neural_roi_file;
+    elseif isfield(source, 'neural_rois')
+        neural_path = source.neural_rois;
+    end
+
+    if isempty(neural_path) || exist(neural_path, 'file') ~= 2
+        warning('PlotPosterNoCategoryTemporalModelFull:MissingROIFile', ...
+            'Neural ROI file not found (%s); skipping brain maps.', neural_path);
+        return;
+    end
+
+    spatial = load(neural_path, '-mat');
+    if ~isfield(spatial, 'ROI_info') || ~isfield(spatial, 'img_info')
+        warning('PlotPosterNoCategoryTemporalModelFull:InvalidROIFile', ...
+            'ROI file %s missing ROI_info/img_info; skipping brain maps.', neural_path);
+        return;
+    end
+
+    img_info = spatial.img_info;
+    roi_info = spatial.ROI_info;
+    if ~isfield(img_info, 'imageData')
+        warning('PlotPosterNoCategoryTemporalModelFull:NoImageData', ...
+            'img_info.imageData missing in %s; skipping brain maps.', neural_path);
+        return;
+    end
+
+    if isfield(roi_info(1), 'Stats') && isfield(roi_info(1).Stats, 'ROI_binary_mask')
+        dims = size(roi_info(1).Stats.ROI_binary_mask);
+    else
+        dims = size(img_info.imageData);
+    end
+
+    target_names = results.comparison.roi_names;
+    roi_names_source = arrayfun(@(r) char(r.Name), roi_info, 'UniformOutput', false);
+    roi_masks = cell(numel(target_names), 1);
+    for i = 1:numel(target_names)
+        roi_name = target_names{i};
+        match_idx = find(strcmpi(roi_names_source, roi_name), 1);
+        if isempty(match_idx)
+            error('PlotPosterNoCategoryTemporalModelFull:ROIMaskMissing', ...
+                'ROI "%s" not found in %s', roi_name, neural_path);
+        end
+        roi_struct = roi_info(match_idx);
+        if ~isfield(roi_struct, 'Stats') || ...
+                ~isfield(roi_struct.Stats, 'ROI_binary_mask')
+            error('PlotPosterNoCategoryTemporalModelFull:MaskMissing', ...
+                'ROI "%s" missing Stats.ROI_binary_mask in %s', roi_name, neural_path);
+        end
+        mask = roi_struct.Stats.ROI_binary_mask;
+        if ~isequal(size(mask), dims)
+            error('PlotPosterNoCategoryTemporalModelFull:MaskSizeMismatch', ...
+                'ROI "%s" mask size mismatch (expected %dx%d).', roi_name, dims(1), dims(2));
+        end
+        roi_masks{i} = mask;
+    end
+
+    brain_mask = load_optional_mask(source, 'brain_mask_file', dims);
+    if isempty(brain_mask) && isfield(img_info, 'logical_mask')
+        brain_mask = logical(img_info.logical_mask);
+    end
+    if isempty(brain_mask)
+        brain_mask = true(dims);
+    end
+
+    vascular_mask = load_optional_mask(source, 'vascular_mask_file', dims);
+    if isempty(vascular_mask)
+        vascular_mask = false(dims);
+    end
+
+    mask_shape = brain_mask & ~vascular_mask;
+    base_rgb = build_mask_background(mask_shape);
+
+    ctx = struct();
+    ctx.target_names = target_names;
+    ctx.roi_masks = roi_masks;
+    ctx.mask_shape = mask_shape;
+    ctx.base_rgb = base_rgb;
+    ctx.dims = dims;
+end
+
+function name_out = assign_default_label(name_in, idx)
+    if nargin < 1 || isempty(name_in)
+        name_out = sprintf('Group %d', idx);
+    else
+        name_out = strtrim(name_in);
+        if isempty(name_out)
+            name_out = sprintf('Group %d', idx);
+        end
+    end
+end
+
 
 %% ================= Helper Functions =================
 
@@ -579,12 +949,15 @@ function mask = load_optional_mask(source, field_name, dims)
     end
 end
 
-function plot_metric_map(ax, base_rgb, metric_map, cmap, clim, ttl, mask_shape, is_categorical, draw_mask_outline)
+function plot_metric_map(ax, base_rgb, metric_map, cmap, clim, ttl, mask_shape, is_categorical, draw_mask_outline, roi_masks)
     if nargin < 8 || isempty(is_categorical)
         is_categorical = false;
     end
     if nargin < 9 || isempty(draw_mask_outline)
         draw_mask_outline = false;
+    end
+    if nargin < 10 || isempty(roi_masks)
+        roi_masks = {};
     end
     axes(ax);
     cla(ax);
@@ -611,6 +984,15 @@ function plot_metric_map(ax, base_rgb, metric_map, cmap, clim, ttl, mask_shape, 
     end
     if draw_mask_outline
         plot_mask_outline(ax, mask_shape);
+    end
+    if ~isempty(roi_masks)
+        for idx = 1:numel(roi_masks)
+            mask = roi_masks{idx};
+            if isempty(mask) || ~any(mask(:))
+                continue;
+            end
+            contour(ax, mask, [0.5 0.5], 'Color', [0 0 0], 'LineWidth', 0.8);
+        end
     end
     hold(ax, 'off');
     title(ax, ttl, 'FontSize', 16, 'FontWeight', 'bold');
@@ -666,4 +1048,13 @@ function val = clamp_unit_value(val)
             'Saturation values must be finite scalars in [0, 1].');
     end
     val = max(0, min(1, val));
+end
+function n_lost_start = derive_lost_start(meta)
+    if isfield(meta, 'n_timepoints_lost_start')
+        n_lost_start = meta.n_timepoints_lost_start;
+    elseif isfield(meta, 'frames_lost_start')
+        n_lost_start = meta.frames_lost_start;
+    else
+        n_lost_start = 0;
+    end
 end

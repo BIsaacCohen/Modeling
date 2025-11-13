@@ -204,6 +204,36 @@ save('temporal_kernels_for_stats.mat', 'beta_matrix', 'lag_times', ...
 3. **TemporalModelFull_test_all_rois.mat** - Example results (all ROIs)
 4. **TemporalModelFull_test_subset.mat** - Example results (3 ROIs)
 
+## NEW: TemporalModelEventsFull.m
+
+TemporalModelEventsFull extends these same multi-ROI speedups to the combined
+motion + event design used by TemporalModelEvents. It shares the same API and
+outputs (temporal kernels, predictions, cross-ROI comparison), but each ROI is fit
+against a design matrix that concatenates:
+
+- Bidirectional face-motion lags (predictor from ROI.modalities.behavior)
+- Stimulus kernels (e.g., 0:0.1:2 s) convolved with event onsets
+- Lick kernels for post-stimulus / water / omission categories
+
+Key additions:
+
+- Supports `target_neural_rois`, `stim_kernel`, `lick_kernel`, `remove_initial_seconds`, etc.
+- Builds a single design matrix and runs ridgeMML once per fold for all ROIs.
+- Returns per-ROI motion kernels **and** event kernels, with CV means/SEMs.
+- Produces multi-ROI plots (kernel overlay, heatmap, R^2 bars) and saves results to
+  `TemporalModelEventsFull_*` MAT files.
+
+Usage mirrors TemporalModelFull, now with the extra `session_file` argument:
+
+```matlab
+load('ROI.mat');
+session_file = 'SessionData.mat';
+opts = struct('behavior_predictor','Face','stim_kernel',0:0.1:2);
+results = TemporalModelEventsFull(ROI, session_file, opts);
+```
+
+See `Modeling/TemporalModelEventsFull.m` for full option documentation.
+
 ## Comparison with TemporalModel.m
 
 | Feature | TemporalModel | TemporalModelFull |
