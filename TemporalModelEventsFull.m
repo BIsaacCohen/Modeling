@@ -715,9 +715,16 @@ for trial = 1:n_trials
         stimulus_events.noise_primary.times(end+1) = noise_time; %#ok<AGROW>
         intensity = 1;
         if isfield(SessionData, 'TrialSettings') && ...
-                length(SessionData.TrialSettings) >= trial && ...
-                isfield(SessionData.TrialSettings{trial}, 'NoiseLevel')
-            intensity = SessionData.TrialSettings{trial}.NoiseLevel;
+                numel(SessionData.TrialSettings) >= trial
+            trial_setting_entry = SessionData.TrialSettings;
+            if iscell(trial_setting_entry)
+                trial_setting_entry = trial_setting_entry{trial};
+            else
+                trial_setting_entry = trial_setting_entry(trial);
+            end
+            if isstruct(trial_setting_entry) && isfield(trial_setting_entry, 'NoiseLevel')
+                intensity = trial_setting_entry.NoiseLevel;
+            end
         end
         stimulus_events.noise_primary.intensities(end+1) = intensity; %#ok<AGROW>
     end
