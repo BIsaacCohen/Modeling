@@ -66,6 +66,7 @@ plot_all_temporal_kernels(results, opts.kernel_overlay_rois, ...
 plot_temporal_kernel_heatmap(results);
 plot_multi_roi_predictions_poster(results, opts.prediction_rois);
 plot_peak_beta_brainmaps_poster(results);
+plot_cv_fold_progression(results);
 fprintf('Poster plots generated.\n');
 
 end
@@ -286,11 +287,13 @@ function plot_multi_roi_predictions_poster(results, target_roi_names)
         grid(ax, 'off');
         set(ax, 'Box', 'off');
 
-        % Add R^2 annotation with enhanced visibility
+        % Add R^2 annotation with enhanced visibility (CV fold range)
+        R2_folds = results.performance(roi_idx).R2_cv_folds;
+        R2_min = min(R2_folds) * 100;
+        R2_max = max(R2_folds) * 100;
         text(ax, 0.02, 0.98, ...
-            sprintf('R^2 (CV): %.2f%% ± %.2f%%', ...
-                results.performance(roi_idx).R2_cv_mean*100, ...
-                results.performance(roi_idx).R2_cv_sem*100), ...
+            sprintf('R^2 (CV): %.2f%% [range: %.2f-%.2f%%]', ...
+                results.performance(roi_idx).R2_cv_mean*100, R2_min, R2_max), ...
             'Units', 'normalized', 'VerticalAlignment', 'top', ...
             'FontSize', 11, 'FontWeight', 'bold', ...
             'BackgroundColor', [1 1 1 0.85], 'EdgeColor', 'k', 'LineWidth', 1.5);
@@ -521,6 +524,52 @@ function plot_peak_beta_brainmaps_poster(results)
     end
     plot_metric_map(ax3, base_rgb, r2_map, parula(256), r2_limits, ...
         'CV R^2 (%)', mask_shape);
+end
+
+function plot_cv_fold_progression(results)
+    % Plot all 5 CV fold R² values for each ROI with color indicating fold order
+    % Y-axis: R² (%), X-axis: ROI names, Color: Fold sequence (1→5)
+
+    roi_names = results.comparison.roi_names;
+    n_rois = numel(roi_names);
+    cv_folds = results.metadata.cv_folds;
+
+    fig_title = 'CV Fold Progression';
+    figure('Name', fig_title, 'Position', [300 300 1000 500]);
+
+    hold on;
+
+    % Sequential colormap for folds (fold 1 = light, fold 5 = dark)
+    fold_colors = parula(cv_folds);
+
+    for roi = 1:n_rois
+        R2_folds = results.performance(roi).R2_cv_folds * 100;
+        x_pos = repmat(roi, cv_folds, 1);
+
+        % Plot points colored by fold order
+        scatter(x_pos, R2_folds, 100, fold_colors, 'filled', ...
+            'MarkerEdgeColor', 'k', 'LineWidth', 1.5);
+
+        % Connect with light line to show progression through folds
+        plot(x_pos, R2_folds, 'Color', [0.7 0.7 0.7], 'LineWidth', 1);
+    end
+
+    hold off;
+
+    xlabel('Neural ROI', 'FontSize', 13);
+    ylabel('R² (%)', 'FontSize', 13);
+    title(fig_title, 'FontSize', 16, 'FontWeight', 'bold');
+    xticks(1:n_rois);
+    xticklabels(roi_names);
+    xtickangle(45);
+    grid off;
+    set(gca, 'Box', 'off');
+
+    % Add colorbar legend for fold order
+    cb = colorbar;
+    cb.Label.String = 'Fold Number';
+    cb.Label.FontSize = 12;
+    caxis([1, cv_folds]);
 end
 
 %% ================= Helper Functions =================

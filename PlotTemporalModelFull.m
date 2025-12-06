@@ -181,7 +181,7 @@ function plot_performance_comparison(results)
     n_rois = results.metadata.n_rois;
     roi_names = results.comparison.roi_names;
     R2_cv = [results.performance.R2_cv_mean]';
-    R2_sem = [results.performance.R2_cv_sem]';
+    R2_ci95 = [results.performance.R2_cv_ci95]';
     R2_full = [results.performance.R2_full_data]';
     peak_lags = results.comparison.peak_lags_all_sec';
 
@@ -204,10 +204,10 @@ function plot_performance_comparison(results)
     end
     x_pos = 1:n_rois;
 
-    % Plot CV R^2 with error bars
+    % Plot CV R^2 with 95% CI error bars
     bar(ax1, x_pos, R2_cv * 100, 'FaceColor', [0.3 0.5 0.8]);
     hold(ax1, 'on');
-    errorbar(ax1, x_pos, R2_cv * 100, R2_sem * 100, 'k.', 'LineWidth', 1.5, ...
+    errorbar(ax1, x_pos, R2_cv * 100, R2_ci95 * 100, 'k.', 'LineWidth', 1.5, ...
         'CapSize', 5);
 
     % Overlay full-data R^2 as dots
@@ -220,7 +220,7 @@ function plot_performance_comparison(results)
     xticks(ax1, x_pos);
     xticklabels(ax1, roi_names);
     xtickangle(ax1, 45);
-    legend(ax1, {'R^2 (CV mean +/- SEM)', 'R^2 (full-data)'}, 'Location', 'best');
+    legend(ax1, {'R^2 (CV mean, 95% CI)', 'R^2 (full-data)'}, 'Location', 'best');
     grid(ax1, 'on');
     title(ax1, 'Model Performance', 'FontSize', 12);
 
@@ -333,11 +333,12 @@ function plot_multi_roi_predictions(results)
         legend(ax, 'Location', 'best', 'FontSize', 8);
         grid(ax, 'on');
 
-        % Add R^2 annotation
+        % Add R^2 annotation with 95% CI
         text(ax, 0.02, 0.98, ...
-            sprintf('%s R^2 (CV): %.2f%% +/- %.2f%%', roi_tag, ...
+            sprintf('%s R^2 (CV): %.2f%% [95%% CI: %.2f-%.2f%%]', roi_tag, ...
                 results.performance(roi_idx).R2_cv_mean*100, ...
-                results.performance(roi_idx).R2_cv_sem*100), ...
+                (results.performance(roi_idx).R2_cv_mean - results.performance(roi_idx).R2_cv_ci95)*100, ...
+                (results.performance(roi_idx).R2_cv_mean + results.performance(roi_idx).R2_cv_ci95)*100), ...
             'Units', 'normalized', 'VerticalAlignment', 'top', ...
             'FontSize', 8, 'BackgroundColor', 'w', 'EdgeColor', 'k');
     end

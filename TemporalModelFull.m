@@ -311,15 +311,20 @@ end
 
 % Compute CV statistics per ROI
 R2_cv_mean = mean(R2_cv_folds, 2);              % [n_rois × 1]
-R2_cv_sem = std(R2_cv_folds, 0, 2) / sqrt(cv_folds);  % [n_rois × 1]
+R2_cv_sem = std(R2_cv_folds, 0, 2) / sqrt(cv_folds);  % [n_rois × 1] (standard error of mean)
+R2_cv_ci95 = 1.96 * R2_cv_sem;                  % [n_rois × 1] (95% confidence interval half-width)
 lambda_cv_mean = mean(lambda_cv_folds, 2);     % [n_rois × 1]
 
 fprintf('\nCV Results Summary:\n');
 fprintf('  R² (CV mean) range: [%.4f, %.4f]\n', min(R2_cv_mean), max(R2_cv_mean));
-fprintf('  Best ROI: %s (R² = %.4f ± %.4f)\n', ...
-    roi_names{R2_cv_mean == max(R2_cv_mean)}, max(R2_cv_mean), R2_cv_sem(R2_cv_mean == max(R2_cv_mean)));
-fprintf('  Worst ROI: %s (R² = %.4f ± %.4f)\n', ...
-    roi_names{R2_cv_mean == min(R2_cv_mean)}, min(R2_cv_mean), R2_cv_sem(R2_cv_mean == min(R2_cv_mean)));
+fprintf('  Best ROI: %s (R² = %.4f [95%% CI: %.4f to %.4f])\n', ...
+    roi_names{R2_cv_mean == max(R2_cv_mean)}, max(R2_cv_mean), ...
+    max(R2_cv_mean) - R2_cv_ci95(R2_cv_mean == max(R2_cv_mean)), ...
+    max(R2_cv_mean) + R2_cv_ci95(R2_cv_mean == max(R2_cv_mean)));
+fprintf('  Worst ROI: %s (R² = %.4f [95%% CI: %.4f to %.4f])\n', ...
+    roi_names{R2_cv_mean == min(R2_cv_mean)}, min(R2_cv_mean), ...
+    min(R2_cv_mean) - R2_cv_ci95(R2_cv_mean == min(R2_cv_mean)), ...
+    min(R2_cv_mean) + R2_cv_ci95(R2_cv_mean == min(R2_cv_mean)));
 
 if any(convergence_cv(:))
     n_failures = sum(convergence_cv(:));
@@ -470,7 +475,8 @@ results.performance = repmat(struct(), n_rois, 1);
 for roi = 1:n_rois
     results.performance(roi).roi_name = roi_names{roi};
     results.performance(roi).R2_cv_mean = R2_cv_mean(roi);
-    results.performance(roi).R2_cv_sem = R2_cv_sem(roi);
+    results.performance(roi).R2_cv_ci95 = R2_cv_ci95(roi);
+    results.performance(roi).R2_cv_sem = R2_cv_sem(roi);  % Keep SEM for reference/calculation
     results.performance(roi).R2_cv_folds = R2_cv_folds(roi, :);
     results.performance(roi).R2_full_data = R2_full(roi);
     results.performance(roi).lambda_cv_mean = lambda_cv_mean(roi);
