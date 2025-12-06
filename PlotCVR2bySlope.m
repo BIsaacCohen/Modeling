@@ -25,10 +25,12 @@ function PlotCVR2bySlope(results, opts)
 %       figure_title        - Custom title (default: auto-generated)
 %
 %   OUTPUT:
-%       Generates a 1x2 brain map figure:
+%       Generates a 1x3 brain map figure:
 %           Panel 1: CV R² during rising/excitation phases
 %           Panel 2: CV R² during falling/inhibition phases
-%       Both panels share the same color scale for direct comparison.
+%           Panel 3: Difference map (Rising R² - Falling R²)
+%       First two panels share the same color scale for direct comparison.
+%       Difference panel uses red-blue diverging scale centered on zero.
 %
 %   ALGORITHM:
 %       1. For each ROI independently:
@@ -301,10 +303,13 @@ mask_shape = brain_mask & ~vascular_mask;
 rising_map(~mask_shape) = nan;
 falling_map(~mask_shape) = nan;
 
+% Create difference map (rising - falling)
+diff_map = rising_map - falling_map;
+
 % Build black background RGB image
 base_rgb = build_mask_background(mask_shape);
 
-% Determine unified color scale (CRITICAL for comparison)
+% Determine unified color scale for rising/falling (CRITICAL for comparison)
 all_r2_values = [R2_rising_pct(~isnan(R2_rising_pct)); ...
                  R2_falling_pct(~isnan(R2_falling_pct))];
 
@@ -317,7 +322,19 @@ else
     r2_limits = [0, r2_max];
 end
 
+% Determine symmetric color scale for difference (centered on zero)
+diff_values = diff_map(~isnan(diff_map));
+if isempty(diff_values)
+    diff_limits = [-1 1];
+    warning('PlotCVR2bySlope:NoDiffData', ...
+        'No valid difference values found; using default color scale [-1, 1]');
+else
+    diff_span = max(abs(diff_values));
+    diff_limits = [-diff_span, diff_span];
+end
+
 fprintf('  Unified R² color scale: [%.1f, %.1f]%%\n', r2_limits(1), r2_limits(2));
+fprintf('  Difference color scale: [%.1f, %.1f]%%\n', diff_limits(1), diff_limits(2));
 
 %% ================= GENERATE FIGURE =================
 
@@ -330,13 +347,13 @@ else
 end
 
 fig = figure('Name', 'CV R2 by Slope Analysis', ...
-    'Position', [100 200 1200 500]);
+    'Position', [100 200 1800 500]);
 
 % Use tiledlayout if available (R2019b+), otherwise subplot
 use_tiled = exist('tiledlayout', 'file') == 2;
 layout = [];
 if use_tiled
-    layout = tiledlayout(1, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
+    layout = tiledlayout(1, 3, 'TileSpacing', 'compact', 'Padding', 'compact');
 end
 
 % Colormap (parula for consistency with other R² plots)
@@ -346,7 +363,7 @@ cmap_r2 = parula(256);
 if use_tiled
     ax1 = nexttile(layout, 1);
 else
-    ax1 = subplot(1, 2, 1);
+    ax1 = subplot(1, 3, 1);
 end
 plot_metric_map(ax1, base_rgb, rising_map, cmap_r2, r2_limits, ...
     'CV R^2 - Rising/Excitation', mask_shape);
@@ -355,10 +372,20 @@ plot_metric_map(ax1, base_rgb, rising_map, cmap_r2, r2_limits, ...
 if use_tiled
     ax2 = nexttile(layout, 2);
 else
-    ax2 = subplot(1, 2, 2);
+    ax2 = subplot(1, 3, 2);
 end
 plot_metric_map(ax2, base_rgb, falling_map, cmap_r2, r2_limits, ...
     'CV R^2 - Falling/Inhibition', mask_shape);
+
+% Panel 3: Difference (Rising - Falling)
+if use_tiled
+    ax3 = nexttile(layout, 3);
+else
+    ax3 = subplot(1, 3, 3);
+end
+cmap_diff = redbluecmap(256);  % Red-white-blue diverging colormap
+plot_metric_map(ax3, base_rgb, diff_map, cmap_diff, diff_limits, ...
+    'R^2 Difference (Rising - Falling)', mask_shape);
 
 % Add super title
 add_super_title(fig, layout, fig_title);
@@ -514,4 +541,19 @@ function add_super_title(fig_handle, layout_handle, title_str)
             'String', title_str, 'HorizontalAlignment', 'center', ...
             'EdgeColor', 'none', 'FontSize', 16, 'Interpreter', 'none');
     end
+end
+
+function cmap = redbluecmap(m)
+% Generate red-white-blue colormap centered on zero
+% Used for diverging maps where negative=red, zero=white, positive=blue
+    if nargin < 1
+        m = 256;
+    end
+
+    % Red for negative, blue for positive, white at zero
+    r = [ones(m/2, 1); linspace(1, 0, m/2)'];
+    g = [linspace(0, 1, m/2)'; linspace(1, 0, m/2)'];
+    b = [linspace(0, 1, m/2)'; ones(m/2, 1)];
+
+    cmap = [r, g, b];
 end
