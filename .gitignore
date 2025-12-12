@@ -6,6 +6,7 @@ Thumbs.db
 *.asv
 *.m~
 *.mex*
+*.mat
 slprj/
 *.slxc
 *.mdl.r20*
@@ -19,4 +20,7 @@ slprj/
 *.mexmaci64
 *.mexglx
 *.mexa64
+
+# Analysis outputs
+/results/
 
