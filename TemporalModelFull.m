@@ -1,4 +1,4 @@
-function results = TemporalModelFull(ROI, opts)
+﻿function results = TemporalModelFull(ROI, opts)
 % TemporalModelFull Multi-ROI bidirectional lag ridge regression
 %
 %   Fits temporal models for ALL neural ROIs simultaneously:
@@ -14,7 +14,7 @@ function results = TemporalModelFull(ROI, opts)
 %
 %   REQUIRED INPUTS:
 %       ROI     - ROI struct from rois_to_mat.m containing:
-%                 .modalities.fluorescence.data [T x N]
+%                 .modalities.fluorefscence.data [T x N]
 %                 .modalities.fluorescence.labels {1 x N} (ROI names)
 %                 .modalities.fluorescence.sample_rate (Hz)
 %                 .modalities.behavior.data [Tb x Nb]
@@ -262,7 +262,10 @@ fold_size = floor(n_valid / cv_folds);
 beta_cv_folds = zeros(n_lags_total, n_rois, cv_folds);  % [lags × ROIs × folds]
 lambda_cv_folds = zeros(n_rois, cv_folds);              % [ROIs × folds]
 R2_cv_folds = zeros(n_rois, cv_folds);                  % [ROIs × folds]
+corr_cv_folds = nan(n_rois, cv_folds);                  % [ROIs x folds] Pearson correlation per fold
 convergence_cv = zeros(n_rois, cv_folds);               % [ROIs × folds]
+
+negative_r2_log = struct('roi_idx', {}, 'fold_idx', {}, 'value', {});
 
 for fold = 1:cv_folds
     % Define test indices (contiguous block) - SAME for all ROIs
@@ -294,6 +297,9 @@ for fold = 1:cv_folds
     X_test_centered = bsxfun(@minus, X_test, X_train_mean);
     Y_pred_test_all = bsxfun(@plus, X_test_centered * beta_fold, Y_train_mean);  % [n_test × n_rois]
 
+    % Store CV predictions in chronological order
+    Y_pred_cv_all_folds(test_idx, :) = Y_pred_test_all;
+
     % Compute test R² for each ROI independently
     for roi = 1:n_rois
         Y_test_roi = Y_test_all(:, roi);
@@ -301,7 +307,18 @@ for fold = 1:cv_folds
 
         TSS_test = sum((Y_test_roi - mean(Y_test_roi)).^2);
         RSS_test = sum((Y_test_roi - Y_pred_test_roi).^2);
-        R2_cv_folds(roi, fold) = max(0, 1 - RSS_test / TSS_test);
+        R2_raw = 1 - RSS_test / TSS_test;
+        R2_cv_folds(roi, fold) = R2_raw;
+        if R2_raw < 0
+            negative_entry = struct('roi_idx', roi, 'fold_idx', fold, 'value', R2_raw);
+            negative_r2_log(end+1, 1) = negative_entry; %#ok<AGROW>
+        end
+
+        if all(~isfinite(Y_test_roi)) || all(~isfinite(Y_pred_test_roi))
+            corr_cv_folds(roi, fold) = NaN;
+        else
+            corr_cv_folds(roi, fold) = corr(Y_test_roi, Y_pred_test_roi, 'rows', 'complete');
+        end
     end
 
     fprintf('  Fold %d/%d: R² range [%.4f, %.4f], mean lambda = %.4f\n', ...
@@ -313,6 +330,8 @@ end
 R2_cv_mean = mean(R2_cv_folds, 2);              % [n_rois × 1]
 R2_cv_sem = std(R2_cv_folds, 0, 2) / sqrt(cv_folds);  % [n_rois × 1] (standard error of mean)
 R2_cv_ci95 = 1.96 * R2_cv_sem;                  % [n_rois × 1] (95% confidence interval half-width)
+corr_cv_mean = mean(corr_cv_folds, 2, 'omitnan');      % [n_rois x 1]
+corr_cv_sem = std(corr_cv_folds, 0, 2, 'omitnan') / sqrt(cv_folds); % [n_rois x 1]
 lambda_cv_mean = mean(lambda_cv_folds, 2);     % [n_rois × 1]
 
 fprintf('\nCV Results Summary:\n');
@@ -325,6 +344,16 @@ fprintf('  Worst ROI: %s (R² = %.4f [95%% CI: %.4f to %.4f])\n', ...
     roi_names{R2_cv_mean == min(R2_cv_mean)}, min(R2_cv_mean), ...
     min(R2_cv_mean) - R2_cv_ci95(R2_cv_mean == min(R2_cv_mean)), ...
     min(R2_cv_mean) + R2_cv_ci95(R2_cv_mean == min(R2_cv_mean)));
+
+if ~isempty(negative_r2_log)
+    total_cv_entries = numel(R2_cv_folds);
+    [min_neg_val, min_idx] = min([negative_r2_log.value]);
+    worst_entry = negative_r2_log(min_idx);
+    fprintf('  Note: %d/%d CV R^2 values were negative (min = %.4f in ROI %s, fold %d). Values are left unclipped.\n', ...
+        numel(negative_r2_log), total_cv_entries, min_neg_val, ...
+        roi_names{worst_entry.roi_idx}, worst_entry.fold_idx);
+end
+
 
 if any(convergence_cv(:))
     n_failures = sum(convergence_cv(:));
@@ -353,16 +382,29 @@ Y_pred_full = bsxfun(@plus, X_centered_full * beta_full, Y_mean_full);  % [n_val
 
 % Compute full-data R² for each ROI
 R2_full = zeros(n_rois, 1);
+corr_full = nan(n_rois, 1);
 for roi = 1:n_rois
     Y_roi = Y_all(:, roi);
     Y_pred_roi = Y_pred_full(:, roi);
 
     TSS_full = sum((Y_roi - mean(Y_roi)).^2);
     RSS_full = sum((Y_roi - Y_pred_roi).^2);
-    R2_full(roi) = max(0, 1 - RSS_full / TSS_full);
+    R2_full(roi) = 1 - RSS_full / TSS_full;
+
+    if all(~isfinite(Y_roi)) || all(~isfinite(Y_pred_roi))
+        corr_full(roi) = NaN;
+    else
+        corr_full(roi) = corr(Y_roi, Y_pred_roi, 'rows', 'complete');
+    end
 end
 
-fprintf('  R² (full-data) range: [%.4f, %.4f]\n', min(R2_full), max(R2_full));
+fprintf('  R^2 (full-data) range: [%.4f, %.4f]\n', min(R2_full), max(R2_full));
+if any(R2_full < 0)
+    [min_full_val, min_full_idx] = min(R2_full);
+    fprintf('  Note: %d/%d full-data R^2 values were negative (min = %.4f in ROI %s). Values are left unclipped.\n', ...
+        sum(R2_full < 0), numel(R2_full), min_full_val, roi_names{min_full_idx});
+end
+
 
 %% 10. Compute temporal kernel statistics from CV folds (per ROI)
 fprintf('\nComputing temporal kernel statistics for each ROI...\n');
@@ -479,6 +521,10 @@ for roi = 1:n_rois
     results.performance(roi).R2_cv_sem = R2_cv_sem(roi);  % Keep SEM for reference/calculation
     results.performance(roi).R2_cv_folds = R2_cv_folds(roi, :);
     results.performance(roi).R2_full_data = R2_full(roi);
+    results.performance(roi).Corr_cv_mean = corr_cv_mean(roi);
+    results.performance(roi).Corr_cv_sem = corr_cv_sem(roi);
+    results.performance(roi).Corr_cv_folds = corr_cv_folds(roi, :);
+    results.performance(roi).Corr_full_data = corr_full(roi);
     results.performance(roi).lambda_cv_mean = lambda_cv_mean(roi);
     results.performance(roi).lambda_full_data = lambda_full(roi);
     results.performance(roi).convergence_cv_failures = sum(convergence_cv(roi, :));
@@ -490,6 +536,7 @@ results.comparison = struct();
 results.comparison.roi_names = roi_names;
 results.comparison.beta_matrix_cv = beta_cv_mean_all;       % [n_lags × n_rois]
 results.comparison.R2_all_rois = R2_cv_mean';               % [1 × n_rois]
+results.comparison.Corr_all_rois = corr_cv_mean';           % [1 x n_rois] Pearson r (CV mean)
 results.comparison.peak_lags_all_sec = peak_lags_sec';      % [1 × n_rois]
 results.comparison.peak_betas_all = peak_betas';            % [1 × n_rois]
 results.comparison.peak_method_betas_all = peak_method_betas';  % [1 × n_rois] - Always actual peak beta
@@ -497,6 +544,7 @@ results.comparison.peak_method_betas_all = peak_method_betas';  % [1 × n_rois] 
 % --- Predictions (from full-data model) ---
 results.predictions = struct();
 results.predictions.Y_pred = Y_pred_full;                   % [n_valid × n_rois]
+results.predictions.Y_pred_cv = Y_pred_cv_all_folds;        % [n_valid × n_rois] CV predictions (NaN at train indices)
 results.predictions.Y_actual = Y_all;                       % [n_valid × n_rois]
 results.predictions.behavior_trace_z = behavior_trace_center;
 results.predictions.design_matrix_mean = X_mean_full;
@@ -517,6 +565,13 @@ results.metadata.n_timepoints_used = n_valid;
 results.metadata.n_timepoints_lost_start = n_frames_lost_start;
 results.metadata.n_timepoints_lost_end = n_frames_lost_end;
 results.metadata.cv_folds = cv_folds;
+results.metadata.fold_size = fold_size;
+% Fold boundaries in seconds (for visualization)
+fold_boundaries_sec = zeros(cv_folds - 1, 1);
+for f = 1:(cv_folds - 1)
+    fold_boundaries_sec(f) = (n_frames_lost_start + f * fold_size) / sampling_rate;
+end
+results.metadata.fold_boundaries_sec = fold_boundaries_sec;
 results.metadata.peak_metric = opts.peak_metric;
 results.metadata.analysis_window_sec = [analysis_window_min_sec, analysis_window_max_sec];
 results.metadata.timestamp = datestr(now);
@@ -666,3 +721,6 @@ function [window_min, window_max] = parse_analysis_window(val)
     error('TemporalModelFull:AnalysisWindowFormat', ...
         'analysis_window_sec must be a positive scalar or a [min max] vector.');
 end
+
+
+
