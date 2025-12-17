@@ -24,24 +24,7 @@ end
 if ~isfield(opts, 'show_fig'); opts.show_fig = true; end
 
 fprintf('=== Plotting FULL combined-model variable contributions ===\n');
-results_file = '';
-if ischar(results_input) || isstring(results_input)
-    results_file = char(results_input);
-    if exist(results_file, 'file') ~= 2
-        error('Results file "%s" not found.', results_file);
-    end
-    fprintf('Loading results: %s\n', results_file);
-    data = load(results_file, 'results');
-    if ~isfield(data, 'results')
-        error('File %s does not contain a ''results'' struct.', results_file);
-    end
-    results = data.results;
-elseif isstruct(results_input)
-    fprintf('Using provided results struct input.\n');
-    results = results_input;
-else
-    error('results_input must be a MAT file path or a results struct.');
-end
+[results, default_name, default_dir] = resolve_results_input(results_input);
 
 if ~isfield(results, 'contributions')
     error('Results struct missing contributions field. Did you run TemporalModelEventsFull_Contributions?');
@@ -72,13 +55,11 @@ for g = 1:n_groups
     group_colors(g, :) = pick_color(group_labels{g}, color_map, g);
 end
 
-if ~isempty(results_file)
-    [res_dir, res_name, ~] = fileparts(results_file);
-else
+res_dir = default_dir;
+if isempty(res_dir) || ~isfolder(res_dir)
     res_dir = pwd;
-    res_name = 'results_struct';
 end
-if isempty(res_dir); res_dir = pwd; end
+res_name = default_name;
 if ~isfield(opts, 'save_dir') || isempty(opts.save_dir)
     save_dir = res_dir;
 else
@@ -139,6 +120,9 @@ for g = 1:n_groups
         legend_handles(1) = h_exp;
         legend_handles(2) = h_uniq;
     end
+
+    perform_one_sample_ttest(group_labels{g}, exp_vals, 'Explained');
+    perform_one_sample_ttest(group_labels{g}, uniq_vals, 'Unique');
 end
 
 xticks(ax, 1:n_groups);
@@ -180,6 +164,117 @@ if ~opts.show_fig
 end
 
 fprintf('Full ROI combined-model contribution figure generated.\n');
+end
+
+function perform_one_sample_ttest(group_label, values, metric_label)
+if nargin < 3 || isempty(metric_label)
+    metric_label = 'Metric';
+end
+vals = values(:);
+vals = vals(~isnan(vals));
+if numel(vals) < 2
+    fprintf('  [ttest] %s (%s): not enough samples (n=%d).\n', group_label, metric_label, numel(vals));
+    return;
+end
+[~, p_val, ~, stats] = ttest(vals, 0, 'Tail', 'right');
+t_stat = stats.tstat;
+df = stats.df;
+mean_val = mean(vals);
+fprintf('  [ttest] %s (%s): mean=%.3f%%, t(%d)=%.3f, p=%.3g\n', ...
+    group_label, metric_label, mean_val, df, t_stat, p_val);
+end
+
+function [results, res_name, res_dir] = resolve_results_input(input_value)
+results = [];
+res_name = 'results_struct';
+res_dir = pwd;
+if iscell(input_value)
+    [results, res_name] = combine_results_for_plot(input_value);
+elseif isstruct(input_value) && numel(input_value) > 1
+    [results, res_name] = combine_results_for_plot(num2cell(input_value));
+elseif ischar(input_value) || isstring(input_value)
+    file_path = char(input_value);
+    if exist(file_path, 'file') ~= 2
+        error('Results file "%s" not found.', file_path);
+    end
+    fprintf('Loading results: %s\n', file_path);
+    data = load(file_path, 'results');
+    if ~isfield(data, 'results')
+        error('File %s does not contain a ''results'' struct.', file_path);
+    end
+    results = data.results;
+    [res_dir, res_name, ~] = fileparts(file_path);
+elseif isstruct(input_value)
+    fprintf('Using provided results struct input.\n');
+    results = input_value;
+else
+    error('results_input must be a MAT file path, struct, or cell array of inputs.');
+end
+end
+
+function [combined_results, combined_name] = combine_results_for_plot(input_list)
+if isempty(input_list)
+    error('No result entries provided for combination.');
+end
+results_list = cell(numel(input_list), 1);
+for i = 1:numel(input_list)
+    entry = input_list{i};
+    if isempty(entry)
+        error('Entry %d in the input list is empty.', i);
+    end
+    if ischar(entry) || isstring(entry)
+        file_path = char(entry);
+        if exist(file_path, 'file') ~= 2
+            error('Results file "%s" not found.', file_path);
+        end
+        fprintf('  Loading results %d: %s\n', i, file_path);
+        data = load(file_path, 'results');
+        if ~isfield(data, 'results')
+            error('File %s does not contain a ''results'' struct.', file_path);
+        end
+        results_list{i} = data.results;
+    elseif isstruct(entry)
+        results_list{i} = entry;
+    else
+        error('Unsupported entry type in results list (index %d).', i);
+    end
+end
+fprintf('Combining %d result inputs for aggregated plotting.\n', numel(results_list));
+combined_contr = merge_contribution_structs(results_list);
+combined_results = struct('contributions', combined_contr);
+combined_name = sprintf('combined_%d_sessions', numel(results_list));
+end
+
+function combined = merge_contribution_structs(results_list)
+first = results_list{1};
+if ~isfield(first, 'contributions')
+    error('Result entry 1 missing contributions field.');
+end
+combined = first.contributions;
+required = {'group_labels','group_single_R2','group_shuffle_R2','R2_cv_percent','R2_mean_percent'};
+missing = required(~isfield(combined, required));
+if ~isempty(missing)
+    error('First contributions struct missing fields: %s', strjoin(missing, ', '));
+end
+for idx = 2:numel(results_list)
+    res = results_list{idx};
+    if ~isfield(res, 'contributions')
+        error('Result entry %d missing contributions field.', idx);
+    end
+    contr = res.contributions;
+    if numel(contr.group_labels) ~= numel(combined.group_labels) || ...
+            any(~strcmp(contr.group_labels(:), combined.group_labels(:)))
+        error('Group labels do not match between result entries 1 and %d.', idx);
+    end
+    combined.group_single_R2 = cat(2, combined.group_single_R2, contr.group_single_R2);
+    combined.group_shuffle_R2 = cat(2, combined.group_shuffle_R2, contr.group_shuffle_R2);
+    combined.group_explained_mean = cat(2, combined.group_explained_mean, contr.group_explained_mean);
+    combined.group_explained_std = cat(2, combined.group_explained_std, contr.group_explained_std);
+    combined.group_unique_mean = cat(2, combined.group_unique_mean, contr.group_unique_mean);
+    combined.group_unique_std = cat(2, combined.group_unique_std, contr.group_unique_std);
+    combined.R2_cv_percent = cat(1, combined.R2_cv_percent, contr.R2_cv_percent);
+    combined.R2_mean_percent = cat(1, combined.R2_mean_percent, contr.R2_mean_percent(:));
+end
 end
 
 function cmap = builtin_color_map()

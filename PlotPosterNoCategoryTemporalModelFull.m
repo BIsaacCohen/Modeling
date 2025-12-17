@@ -647,6 +647,9 @@ function plot_variable_beta_peak_brainmaps(results)
     label_list = {};
     beta_rows = [];
     peak_times = [];
+    motion_snapshot = [];
+    motion_label_entry = '';
+    motion_peak_time = NaN;
 
     for idx = valid_groups(:)'
         lag_times = template(idx).lag_times_sec(:)';
@@ -695,15 +698,21 @@ function plot_variable_beta_peak_brainmaps(results)
             if ~isempty(snapshot)
                 if isfield(results, 'metadata') && isfield(results.metadata, 'behavior_predictor') ...
                         && ~isempty(results.metadata.behavior_predictor)
-                    motion_label = sprintf('%s motion', results.metadata.behavior_predictor);
+                    motion_label_str = sprintf('%s motion', results.metadata.behavior_predictor);
                 else
-                    motion_label = 'Motion predictor';
+                    motion_label_str = 'Motion predictor';
                 end
-                label_list{end+1} = motion_label; %#ok<AGROW>
-                peak_times(end+1, 1) = peak_time; %#ok<AGROW>
-                beta_rows = [beta_rows; snapshot']; %#ok<AGROW>
+                motion_label_entry = motion_label_str;
+                motion_peak_time = peak_time;
+                motion_snapshot = snapshot';
             end
         end
+    end
+
+    if ~isempty(motion_snapshot)
+        beta_rows = [motion_snapshot; beta_rows];
+        label_list = [{motion_label_entry}; label_list];
+        peak_times = [motion_peak_time; peak_times];
     end
 
     if isempty(beta_rows)

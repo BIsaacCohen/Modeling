@@ -1,4 +1,4 @@
-function [L, betas, convergenceFailures] = ridgeMML(Y, X, recenter, L)
+function [L, betas, convergenceFailures] = ridgeMML(Y, X, recenter, L, time_limit)
 % [lambdas, betas, convergenceFailures] = ridgeMML(Y, X [, recenter] [, lambdas])
 % 
 % This is an implementation of Ridge regression with the Ridge parameter
@@ -67,12 +67,15 @@ if ~exist('recenter', 'var')
   recenter = 1;
 end
 
-if ~exist('L', 'var') || isnan(L(1))
+if ~exist('L', 'var') || isempty(L) || isnan(L(1))
   computeL = 1;
 else
   computeL = 0;
 end
 
+if ~exist('time_limit', 'var') || isempty(time_limit)
+  time_limit = Inf;
+end
 
 %% Error checking
 
@@ -147,7 +150,7 @@ if computeL
   
   convergenceFailures = false(1, pY);
   for i = 1:pY
-    [L(i), flag] = ridgeMMLOneY(q, d2, n, YVar(i), alpha2(:, i));
+    [L(i), flag] = ridgeMMLOneY(q, d2, n, YVar(i), alpha2(:, i), time_limit);
     convergenceFailures(i) = (flag < 1);
   end
   
@@ -223,7 +226,7 @@ end
 
 
 
-function [L, flag] = ridgeMMLOneY(q, d2, n, YVar, alpha2)
+function [L, flag] = ridgeMMLOneY(q, d2, n, YVar, alpha2, time_limit)
 % Compute the lambda for one column of Y
 
 % Width of smoothing kernel to use when dealing with large lambda
@@ -235,6 +238,12 @@ smooth = 7;
 stepSwitch = 25;
 stepDenom = 100;
 
+if ~exist('time_limit', 'var') || isempty(time_limit) || ~isfinite(time_limit) || time_limit <= 0
+  time_limit = Inf;
+end
+timer_start = tic;
+time_exceeded = @() (isfinite(time_limit) && toc(timer_start) > time_limit);
+
 
 %% Set up smoothing
 
@@ -245,6 +254,9 @@ testValsL = NaN(1, smooth);
 
 % Initialize index of the buffers where we'll write the next value
 smBufferI = 0;
+anyFiniteNLL = false;
+lastFiniteNLL = Inf;
+currentL = 0;
 
 
 %% Evaluate the log likelihood of the data for increasing values of lambda
@@ -261,26 +273,47 @@ NLLFunc = mintNLLFunc(q, d2, n, YVar, alpha2);
 done = 0;
 NLL = Inf;
 for k = 0:stepSwitch * 4
+  if time_exceeded()
+    flag = -2;
+    L = max(currentL, eps);
+    return;
+  end
   smBufferI = mod(smBufferI, smooth) + 1;
   prevNLL = NLL;
+  currentL = k / 4;
   
   % Compute negative log likelihood of the data for this value of lambda
-  NLL = NLLFunc(k / 4);
+  candidateNLL = NLLFunc(currentL);
+  if ~isfinite(candidateNLL)
+    smBufferI = smBufferI - 1;
+    if smBufferI < 1
+      smBufferI = smooth;
+    end
+    continue;
+  end
+  NLL = candidateNLL;
+  lastFiniteNLL = candidateNLL;
+  anyFiniteNLL = true;
   
   % Add to smoothing buffer
   smBuffer(smBufferI) = NLL;
-  testValsL(smBufferI) = k / 4;
+  testValsL(smBufferI) = currentL;
   
   % Check if we've passed the minimum
   if NLL > prevNLL
     % Compute limits for L
     minL = (k - 2) / 4;
-    maxL = k / 4;
+    maxL = currentL;
     done = 1;
     break;
   end
 end
 
+if ~anyFiniteNLL
+  L = 1;
+  flag = 0;
+  return;
+end
 
 % If we haven't already hit the max likelihood, continue increasing lambda,
 % but now apply smoothing to try to reduce the impact of local minima that
@@ -289,18 +322,38 @@ end
 % Also increase step size from 1/4 to L/stepDenom, for speed and robustness
 % to local minima
 if ~done
-  L = k / 4;
-  NLL = mean(smBuffer);
+  L = max(currentL, 0);
+  NLL = mean(smBuffer, 'omitnan');
+  if ~isfinite(NLL)
+    NLL = lastFiniteNLL;
+  end
   while ~done
+    if time_exceeded()
+      flag = -2;
+      L = max(L, eps);
+      return;
+    end
     L = L + L / stepDenom;
+    currentL = L;
     smBufferI = mod(smBufferI, smooth) + 1;
     prevNLL = NLL;
     
     % Compute negative log likelihood of the data for this value of lambda,
     % overwrite oldest value in the smoothing buffer
-    smBuffer(smBufferI) = NLLFunc(L);
+    candidateNLL = NLLFunc(L);
+    if ~isfinite(candidateNLL)
+      smBufferI = smBufferI - 1;
+      if smBufferI < 1
+        smBufferI = smooth;
+      end
+      continue;
+    end
+    smBuffer(smBufferI) = candidateNLL;
     testValsL(smBufferI) = L;
-    NLL = mean(smBuffer);
+    NLL = mean(smBuffer, 'omitnan');
+    if ~isfinite(NLL)
+      NLL = candidateNLL;
+    end
     
     % Check if we've passed the minimum
     if (NLL > prevNLL)
@@ -325,8 +378,13 @@ end
 % that Karabatsos made a mistake when describing the indexing relative to
 % k*, which is fixed here (we need to go from k*-2 to k*, not k*-1 to k*+1)
 
-[L, ~, flag] = fminbnd(NLLFunc, max(0, minL), maxL, ...
-  optimset('Display', 'off'));
+if time_exceeded()
+  flag = -2;
+  L = max(L, eps);
+else
+  [L, ~, flag] = fminbnd(NLLFunc, max(0, minL), maxL, ...
+    optimset('Display', 'off'));
+end
 
 
 function NLLFunc = mintNLLFunc(q, d2, n, YVar, alpha2)
