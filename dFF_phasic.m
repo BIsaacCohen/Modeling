@@ -6,7 +6,7 @@ function [dff_phasic, diagnostics] = dFF_phasic(trace, sampling_rate, opts)
 %       df/f_phasic = (F(t) - F₀(t)) / F₀(t)
 %
 %   This isolates phasic activity (fast transients) while ignoring slow
-%   trends like photobleaching, hemodynamic drift, or slow motion artifacts.
+%   trends like photobleaching.
 %
 %   [dff_phasic, diagnostics] = dFF_phasic(trace, sampling_rate, opts)
 %
@@ -20,6 +20,7 @@ function [dff_phasic, diagnostics] = dFF_phasic(trace, sampling_rate, opts)
 %       show_plot       - Generate validation plot (default true)
 %       roi_name        - ROI name for plot title (default 'ROI')
 %       min_baseline    - Minimum baseline value to prevent division issues (default 1e-6)
+%       zoom_seconds    - If provided, x-axis zoom window [0, zoom_seconds]; empty shows full trace
 %
 %   OUTPUTS:
 %       dff_phasic      - Phasic df/f timeseries (same length as input)
@@ -61,7 +62,8 @@ defaults = struct(...
     'min_baseline', 1e-6, ...
     'baseline_method', 'butterworth', ...
     'baseline_window_seconds', 600, ...
-    'baseline_percentile', 10);
+    'baseline_percentile', 10, ...
+    'zoom_seconds', []);
 
 opts = populate_defaults(opts, defaults);
 
@@ -147,7 +149,7 @@ diagnostics.sampling_rate = sampling_rate;
 %% Generate validation plot
 if opts.show_plot
     fprintf('  Generating validation plot...\n');
-    plot_dff_phasic_validation(trace, baseline_F0, dff_phasic, sampling_rate, opts.roi_name);
+    plot_dff_phasic_validation(trace, baseline_F0, dff_phasic, sampling_rate, opts.roi_name, opts.zoom_seconds);
 end
 
 fprintf('=== dFF_phasic: Complete ===\n\n');
@@ -166,7 +168,7 @@ function opts = populate_defaults(opts, defaults)
     end
 end
 
-function plot_dff_phasic_validation(raw_trace, baseline, dff_phasic, fs, roi_name)
+function plot_dff_phasic_validation(raw_trace, baseline, dff_phasic, fs, roi_name, zoom_seconds)
 % plot_dff_phasic_validation Generate 2-panel validation plot
 %
 %   Top panel: Raw trace (blue) + Baseline F₀ (red)
@@ -237,8 +239,12 @@ function plot_dff_phasic_validation(raw_trace, baseline, dff_phasic, fs, roi_nam
     % Link x-axes
     linkaxes([ax1, ax2], 'x');
 
-    % Zoom to show detail (first 60 seconds or full trace if shorter)
-    xlim(ax1, [0, min(60, time_vec(end))]);
+    % Zoom window if requested; otherwise show full trace
+    if ~isempty(zoom_seconds) && zoom_seconds > 0
+        xlim(ax1, [0, min(zoom_seconds, time_vec(end))]);
+    else
+        xlim(ax1, [0, time_vec(end)]);
+    end
 end
 
 function baseline = running_percentile_baseline(trace, sampling_rate, window_seconds, percentile)

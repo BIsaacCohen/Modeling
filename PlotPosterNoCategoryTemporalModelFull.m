@@ -260,6 +260,11 @@ function plot_multi_roi_predictions_poster(results, target_roi_names)
 
     meta = results.metadata;
     pred = results.predictions;
+    if isfield(pred, 'Y_actual_cv') && ~isempty(pred.Y_actual_cv)
+        Y_actual_cv_plot = pred.Y_actual_cv;
+    else
+        Y_actual_cv_plot = pred.Y_actual;
+    end
 
     % Time vector for truncated data
     n_valid = meta.n_timepoints_used;
@@ -291,7 +296,7 @@ function plot_multi_roi_predictions_poster(results, target_roi_names)
         ax_handles(i) = ax;
 
         % Actual vs predicted
-        plot(ax, t_truncated, pred.Y_actual(:, roi_idx), 'Color', [21/255, 101/255, 192/255], ...
+        plot(ax, t_truncated, Y_actual_cv_plot(:, roi_idx), 'Color', [21/255, 101/255, 192/255], ...
             'LineWidth', 2.0, 'DisplayName', sprintf('%s (actual)', roi_name));
         hold(ax, 'on');
         plot(ax, t_truncated, pred.Y_pred(:, roi_idx), 'Color', [216/255, 27/255, 96/255], ...
@@ -835,7 +840,14 @@ function plot_peak_beta_corr_brainmaps_poster(results)
 
     target_names = results.comparison.roi_names;
     peak_lags = results.comparison.peak_lags_all_sec;
-    peak_betas = results.comparison.peak_betas_all;
+
+    % Match beta values to the non-correlation map (always use actual peak betas when available)
+    if isfield(results.comparison, 'peak_method_betas_all')
+        peak_betas = results.comparison.peak_method_betas_all;
+    else
+        peak_betas = results.comparison.peak_betas_all;
+    end
+
     corr_all = results.comparison.Corr_all_rois;
     if numel(target_names) ~= numel(peak_lags) || numel(peak_lags) ~= numel(peak_betas)
         warning('PlotPosterNoCategoryTemporalModelFull:MismatchLength', ...

@@ -33,7 +33,6 @@
 %       save_results         - Save results to file (default true)
 %       show_plots           - Generate diagnostic plots (default true)
 %       poster_plots         - Use poster-quality plots instead (default false)
-%       no_category_plots    - Skip predictive/reactive categorization in plots (default false)
 %       prediction_rois      - {1x2} ROI names for poster predictions (default: {'M1_L','V1_L'})
 %       peak_metric          - Metric for classification: 'peak' or 'com' (default 'peak')
 %       analysis_window_sec  - Time window for peak/CoM search (scalar half-width or [min max], seconds; default 1.0)
@@ -86,9 +85,9 @@ defaults = struct(...
     'save_results', true, ...
     'show_plots', true, ...
     'poster_plots', false, ...
-    'no_category_plots', false, ...
     'peak_metric', 'peak', ...
-    'analysis_window_sec', 1.0);
+    'analysis_window_sec', 1.0, ...
+    'resample_blocks', true);
 
 opts = populate_defaults(opts, defaults);
 
@@ -266,6 +265,8 @@ corr_cv_folds = nan(n_rois, cv_folds);                  % [ROIs x folds] Pearson
 convergence_cv = zeros(n_rois, cv_folds);               % [ROIs × folds]
 
 negative_r2_log = struct('roi_idx', {}, 'fold_idx', {}, 'value', {});
+Y_pred_cv_all_folds = nan(n_valid, n_rois);             % standardized CV predictions (NaN at train indices)
+Y_actual_cv_all_folds = nan(n_valid, n_rois);           % standardized CV actuals (NaN at train indices)
 
 for fold = 1:cv_folds
     % Define test indices (contiguous block) - SAME for all ROIs
@@ -283,10 +284,19 @@ for fold = 1:cv_folds
     % Store training means to properly reconstruct predictions after ridgeMML centering
     X_train_mean = mean(X_train, 1);
     Y_train_mean = mean(Y_train_all, 1);
+    X_train_std = std(X_train, 0, 1);
+    X_train_std(X_train_std == 0) = 1;
+    Y_train_std = std(Y_train_all, 0, 1);
+    Y_train_std(Y_train_std == 0) = 1;
+
+    X_train_z = bsxfun(@rdivide, bsxfun(@minus, X_train, X_train_mean), X_train_std);
+    Y_train_z = bsxfun(@rdivide, bsxfun(@minus, Y_train_all, Y_train_mean), Y_train_std);
+    X_test_z = bsxfun(@rdivide, bsxfun(@minus, X_test, X_train_mean), X_train_std);
+    Y_test_z = bsxfun(@rdivide, bsxfun(@minus, Y_test_all, Y_train_mean), Y_train_std);
 
     % Fit ridge regression on training data for ALL ROIs simultaneously
     % ridgeMML returns [n_predictors × n_outcomes] betas and [1 × n_outcomes] lambdas
-    [lambda_fold, beta_fold, conv_fail] = ridgeMML(Y_train_all, X_train, 1);
+    [lambda_fold, beta_fold, conv_fail] = ridgeMML(Y_train_z, X_train_z, 1);
 
     % Store results for each ROI
     beta_cv_folds(:, :, fold) = beta_fold;      % [n_lags × n_rois]
@@ -294,15 +304,16 @@ for fold = 1:cv_folds
     convergence_cv(:, fold) = conv_fail';       % [n_rois × 1]
 
     % Predict on test data for all ROIs
-    X_test_centered = bsxfun(@minus, X_test, X_train_mean);
-    Y_pred_test_all = bsxfun(@plus, X_test_centered * beta_fold, Y_train_mean);  % [n_test × n_rois]
+    X_test_centered = bsxfun(@minus, X_test_z, mean(X_train_z, 1));
+    Y_pred_test_all = bsxfun(@plus, X_test_centered * beta_fold, mean(Y_train_z, 1));  % [n_test x n_rois]
 
     % Store CV predictions in chronological order
     Y_pred_cv_all_folds(test_idx, :) = Y_pred_test_all;
+    Y_actual_cv_all_folds(test_idx, :) = Y_test_z;
 
     % Compute test R² for each ROI independently
     for roi = 1:n_rois
-        Y_test_roi = Y_test_all(:, roi);
+        Y_test_roi = Y_test_z(:, roi);
         Y_pred_test_roi = Y_pred_test_all(:, roi);
 
         TSS_test = sum((Y_test_roi - mean(Y_test_roi)).^2);
@@ -432,6 +443,8 @@ if ~any(window_mask)
         analysis_window_min_sec, analysis_window_max_sec);
 end
 
+lag_times_window = lag_times_sec(window_mask);
+
 fprintf('  Response metric: %s\n', opts.peak_metric);
 fprintf('  Analysis window: %.3f to %.3f seconds (%d/%d lags)\n', ...
     analysis_window_min_sec, analysis_window_max_sec, sum(window_mask), length(lag_times_sec));
@@ -481,6 +494,78 @@ else  % 'com'
         [~, closest_idx] = min(abs(lag_times_sec - com_method_lags_sec(roi)));
         peak_betas(roi) = beta_cv_mean_all(closest_idx, roi);
         peak_betas_sem(roi) = beta_cv_sem_all(closest_idx, roi);
+    end
+end
+
+%% 10b. Optional block-wise resampling for kernel stability (train-only, disjoint blocks)
+com_lag_sec_blocks = [];
+com_lag_frames_blocks = [];
+beta_blocks = [];
+lambda_blocks = [];
+peak_lag_sec_blocks = [];
+peak_beta_blocks = [];
+
+if opts.resample_blocks
+    fprintf('\nResampling: block-wise refits for kernel stability (CoM/peak)...\n');
+
+    n_blocks = cv_folds;
+    com_lag_sec_blocks = zeros(n_rois, n_blocks);
+    com_lag_frames_blocks = zeros(n_rois, n_blocks);
+    peak_lag_sec_blocks = zeros(n_rois, n_blocks);
+    peak_beta_blocks = zeros(n_rois, n_blocks);
+    beta_blocks = zeros(n_lags_total, n_rois, n_blocks);
+    lambda_blocks = zeros(n_rois, n_blocks);
+
+    for b = 1:n_blocks
+        block_start = (b - 1) * fold_size + 1;
+        block_end = min(b * fold_size, n_valid);
+        block_idx = block_start:block_end;
+
+        X_block = X(block_idx, :);
+        Y_block = Y_all(block_idx, :);
+
+        % Standardize within block
+        X_mean_block = mean(X_block, 1);
+        X_std_block = std(X_block, 0, 1);
+        X_std_block(X_std_block == 0) = 1;
+        Y_mean_block = mean(Y_block, 1);
+        Y_std_block = std(Y_block, 0, 1);
+        Y_std_block(Y_std_block == 0) = 1;
+
+        X_block_z = bsxfun(@rdivide, bsxfun(@minus, X_block, X_mean_block), X_std_block);
+        Y_block_z = bsxfun(@rdivide, bsxfun(@minus, Y_block, Y_mean_block), Y_std_block);
+
+        [lambda_block, beta_block, ~] = ridgeMML(Y_block_z, X_block_z, 1);
+
+        beta_blocks(:, :, b) = beta_block;
+        lambda_blocks(:, b) = lambda_block';
+
+        % Peak metrics within analysis window
+        beta_win = beta_block(window_mask, :);
+        [peak_beta_vals, peak_idx_window] = max(beta_win, [], 1);
+        peak_lag_sec_blocks(:, b) = lag_times_window(peak_idx_window)';
+        peak_beta_blocks(:, b) = peak_beta_vals';
+
+        % CoM metrics within analysis window
+        positive_beta = max(beta_win, 0);
+        total_wt = sum(positive_beta, 1);
+        com_sec = zeros(n_rois, 1);
+        com_frames = zeros(n_rois, 1);
+        for roi = 1:n_rois
+            if total_wt(roi) > 0
+                com_val = sum(lag_times_window .* positive_beta(:, roi)) / total_wt(roi);
+                com_sec(roi) = com_val;
+                com_frames(roi) = round(com_val * sampling_rate);
+            else
+                com_sec(roi) = 0;
+                com_frames(roi) = 0;
+            end
+        end
+        com_lag_sec_blocks(:, b) = com_sec;
+        com_lag_frames_blocks(:, b) = com_frames;
+
+        fprintf('  Block %d/%d: CoM sec range [%.4f, %.4f]\n', ...
+            b, n_blocks, min(com_sec), max(com_sec));
     end
 end
 
@@ -544,8 +629,9 @@ results.comparison.peak_method_betas_all = peak_method_betas';  % [1 × n_rois] 
 % --- Predictions (from full-data model) ---
 results.predictions = struct();
 results.predictions.Y_pred = Y_pred_full;                   % [n_valid × n_rois]
-results.predictions.Y_pred_cv = Y_pred_cv_all_folds;        % [n_valid × n_rois] CV predictions (NaN at train indices)
-results.predictions.Y_actual = Y_all;                       % [n_valid × n_rois]
+results.predictions.Y_pred_cv = Y_pred_cv_all_folds;        % [n_valid x n_rois] CV predictions (standardized, NaN at train indices)
+results.predictions.Y_actual_cv = Y_actual_cv_all_folds;    % [n_valid x n_rois] CV actuals (standardized, NaN at train indices)
+results.predictions.Y_actual = Y_all;                       % [n_valid x n_rois] (session-wide z-score)
 results.predictions.behavior_trace_z = behavior_trace_center;
 results.predictions.design_matrix_mean = X_mean_full;
 results.predictions.response_mean = Y_mean_full;
@@ -583,17 +669,24 @@ if isfield(ROI, 'metadata') && isfield(ROI.metadata, 'source')
     results.metadata.source_roi_file = ROI.metadata.source;
 end
 
+% --- Resampling (block-wise refits for kernel stability) ---
+if opts.resample_blocks
+    results.resampling = struct();
+    results.resampling.beta_blocks = beta_blocks;
+    results.resampling.lambda_blocks = lambda_blocks;
+    results.resampling.com_lag_sec_blocks = com_lag_sec_blocks;
+    results.resampling.com_lag_frames_blocks = com_lag_frames_blocks;
+    results.resampling.peak_lag_sec_blocks = peak_lag_sec_blocks;
+    results.resampling.peak_beta_blocks = peak_beta_blocks;
+    results.resampling.block_boundaries_sec = fold_boundaries_sec;
+    results.resampling.note = ['Block-wise refits on CV test blocks for kernel stability ', ...
+        '(train-only per block; not a predictive metric).'];
+end
+
 %% 12. Generate plots
 if opts.show_plots
-    if opts.poster_plots
-        if opts.no_category_plots
-            PlotPosterNoCategoryTemporalModelFull(results, opts);
-        else
-            PlotPosterTemporalModelFull(results, opts);
-        end
-    else
-        PlotTemporalModelFull(results);
-    end
+    % Always use the no-category poster-style plots
+    PlotPosterNoCategoryTemporalModelFull(results, opts);
 end
 
 %% 13. Save results
